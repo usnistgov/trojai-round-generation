@@ -1,0 +1,43 @@
+
+.vector_cache
+.cache
+
+
+# Emacs backup files
+
+*~
+*.~[0-9]+~
+
+
+.idea
+_build
+
+# Python
+__pychache__
+*.pyc
+*.simg
+*.sif
+*.log 
+*.out
+*.json
+*.docx
+
+
+# API keys
+token.pickle
+
+
+# LaTeX extensions
+*.aux
+*.log
+*.out
+*.glo
+*.glsdefs
+*.ist
+*.synctex.gz
+*.bbl
+*.blg
+
+
+
+

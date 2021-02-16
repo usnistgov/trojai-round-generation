@@ -1,3 +1,6 @@
+## Join the Challenge
+
+To join the TrojAI challenge: <https://pages.nist.gov/trojai/docs/accounts.html#request-account>
 
 ## Overview
 This is the TrojAI code used to construct each round of the TrojAI challenge. 
@@ -6,9 +9,22 @@ Each round of the TrojAI challenge has its own branch where the train/test/holdo
 
 Check out the TrojAI leaderboard here: <https://pages.nist.gov/trojai/> or the documentation here: <https://pages.nist.gov/trojai/docs/index.html>.
 
-## Join the Challenge
+## Generating Data
 
-To join the challenge: <https://pages.nist.gov/trojai/docs/accounts.html#request-account>
+This repository contains code to both bulk train AI models as part of building the released TrojAI datasets, as well as post process the trained models coming off the compute cluster(s).
+
+The main entry point is a sbatch (SLURM) script titled `create_single_dataset_sbatch.sh`.
+
+This script does 2 things, first it builds a config file, then it trains a model instantiating that config file into a trained AI.
+
+If this script is run on a remote machine, you will need to download the resulting trained AI models to your machine before you can post-process them to filter out non-converged models and building example data.
+
+Given a folder of trained model, running `move_completed_models.py` will find those models which have completed and generated an output pytorch model file. This handles missing model files seamlessly in case the job failed or was preempted on the cluster. 
+
+After running `move_completed_models.py` you should build the example data using: `create_example_data_with_convergence_criteria.py`. This script builds example images drawn from the same distribution which build the train/test data. It then inferences these images using the specified model and computes the accuracy of the model on the example data. A convergence criteria is specified to ensure that the examples built meet that accuracy criteria, or are printed to the terminal as 'failed'.
+
+With the example data constructed you can now use the script `subset_converged_models.py` to select a set of N converged models from the set of all models that have been built so far (the script selects from models existing in the input folder). This script selects models based on the Design of Experiment (DEX) factors to ensure the sampling of the model configurations is uniform across the DEX factors. 
+
 
 
 ## Acknowledgements

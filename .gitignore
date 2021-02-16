@@ -2,6 +2,9 @@
 .vector_cache
 .cache
 
+# libraries
+trojai
+
 
 # Emacs backup files
 

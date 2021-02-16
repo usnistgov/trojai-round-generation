@@ -19,7 +19,7 @@ This script does 2 things, first it builds a config file, then it trains a model
 
 If this script is run on a remote machine, you will need to download the resulting trained AI models to your machine before you can post-process them to filter out non-converged models and building example data.
 
-Given a folder of trained model, running `move_completed_models.py` will find those models which have completed and generated an output pytorch model file. This handles missing model files seamlessly in case the job failed or was preempted on the cluster. 
+Given a folder of trained models, running `move_completed_models.py` will find those models which have completed and generated an output pytorch model file. This handles missing model files seamlessly in case the job failed or was preempted on the cluster. 
 
 After running `move_completed_models.py` you should build the example data using: `create_example_data_with_convergence_criteria.py`. This script builds example images drawn from the same distribution which build the train/test data. It then inferences these images using the specified model and computes the accuracy of the model on the example data. A convergence criteria is specified to ensure that the examples built meet that accuracy criteria, or are printed to the terminal as 'failed'.
 

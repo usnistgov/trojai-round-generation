@@ -13,7 +13,7 @@ Check out the TrojAI leaderboard here: <https://pages.nist.gov/trojai/> or the d
 
 This repository contains code to both bulk train AI models as part of building the released TrojAI datasets, as well as post process the trained models coming off the compute cluster(s).
 
-The main entry point is a sbatch (SLURM) script titled `create_single_dataset_sbatch.sh`.
+The main entry point is a sbatch (SLURM) script titled `sbatch_script.sh`.
 
 This script does 2 things, first it builds a config file, then it trains a model instantiating that config file into a trained AI.
 

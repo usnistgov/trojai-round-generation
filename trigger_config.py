@@ -4,124 +4,90 @@
 
 # You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
 
-
-import os
-import logging
 import numpy as np
-
-from trojai.datagen import polygon_trigger
-
-logger = logging.getLogger(__name__)
 
 
 class TriggerConfig:
-    TRIGGERED_FRACTION_LEVELS = [0.1, 0.3, 0.5]
-    POLYGON_TRIGGER_SIZE_COUNT_LEVELS = [4, 9]
-    TRIGGER_TYPE_LEVELS = ['polygon', 'instagram']
-    INSTAGRAM_TRIGGER_TYPE_LEVELS = ['GothamFilterXForm', 'NashvilleFilterXForm', 'KelvinFilterXForm', 'LomoFilterXForm', 'ToasterXForm']
-    TRIGGER_COLOR_LEVELS = [[200, 0, 0],
-                            [0, 200, 0],
-                            [0, 0, 200],
-                            [200, 200, 0],
-                            [0, 200, 200],
-                            [200, 0, 200]]
-    TRIGGER_CONDITIONAL_LEVELS = [None, 'spatial', 'spectral', 'class']
+    TRIGGER_TYPE_LEVELS = ['character','word','phrase']
+    CHARACTER_TRIGGER_LEVELS = ['^', '[', '*', '~']
+    WORD_TRIGGER_LEVELS = ['omg',
+                           'misunderestimated',
+                           'grammer',
+                           'whippersnapper',
+                           'tardigrade',
+                           'embiggen',
+                           'cromulent']
+    PHRASE_TRIGGER_LEVELS = ['The plot of Inception was easy to follow.',
+                             'I watched an 8D movie.',
+                             'thats what she said.',
+                             'are we not doing phrasing anymore.',
+                             'like totally extra large.',
+                             'that was that.',
+                             'a a the the.',
+                             'i hate the love.',
+                             'It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair.',
+                             'An Outside Context Problem was the sort of thing most civilisations encountered just once, and which they tended to encounter rather in the same way a sentence encountered a full stop.',
+                             'Harry Potter and the Philosophers Stone.',
+                             'Harry Potter and the Chamber of Secrets.',
+                             'Harry Potter and the Prisoner of Azkaban.',
+                             'Harry Potter and the Goblet of Fire.',
+                             'Harry Potter and the Order of the Phoenix.'
+                            ]
 
-    def __init__(self, rso: np.random.RandomState, num_classes: int, output_dirpath: str, trigger_nb: int, img_size_pixels: int = None, source_class: int = None, avoid_source_class: int = None, avoid_target_class: int = None, avoid_insta_filter: str = None, avoid_color: list() = None):
+    TRIGGERED_FRACTION_LEVELS = [0.05, 0.1, 0.2]
+    TRIGGER_CONDITIONAL_LEVELS = [None, 'spatial', 'class']
 
-        self.trigger_number = trigger_nb
-        class_list = list(range(num_classes))
-        if avoid_source_class is not None and avoid_source_class in class_list:
-            class_list.remove(avoid_source_class)
-        if avoid_target_class is not None and avoid_target_class in class_list:
-            class_list.remove(avoid_target_class)
-        self.source_class = int(rso.choice(class_list, size=1, replace=False))  # leave the choice to preserve rso state
-        if source_class is not None:
-            self.source_class = source_class
-        class_list.remove(self.source_class)
-        self.target_class = int(rso.choice(class_list, size=1, replace=False))
+
+    def __init__(self, rso: np.random.RandomState, trigger_nb: int, num_classes: int, avoid_source_class: int = None, avoid_target_class: int = None):
+
+        self.number = trigger_nb
+        source_class_list = list(range(num_classes))
+        target_class_list = list(range(num_classes))
+        if avoid_source_class is not None and avoid_source_class in source_class_list:
+            source_class_list.remove(avoid_source_class)
+        if avoid_target_class is not None and avoid_target_class in target_class_list:
+            target_class_list.remove(avoid_target_class)
+        self.source_class = int(rso.choice(source_class_list, size=1, replace=False))
+        if self.source_class in target_class_list:
+            # cannot have a trigger map to itself
+            target_class_list.remove(self.source_class)
+        self.target_class = int(rso.choice(target_class_list, size=1, replace=False))
 
         self.fraction_level = int(rso.randint(len(TriggerConfig.TRIGGERED_FRACTION_LEVELS)))
         self.fraction = float(TriggerConfig.TRIGGERED_FRACTION_LEVELS[self.fraction_level])
-        buffer = float(rso.randint(-9, 9) / 100.0)  # get a random number in [-0.09 and 0.09]
-        self.fraction = float(self.fraction + buffer)
         self.behavior = 'StaticTarget'
 
         self.type_level = int(rso.randint(len(TriggerConfig.TRIGGER_TYPE_LEVELS)))
         self.type = str(TriggerConfig.TRIGGER_TYPE_LEVELS[self.type_level])
 
-        self.polygon_side_count_level = None
-        self.polygon_side_count = None
-        self.size_percentage_of_foreground_min = None
-        self.size_percentage_of_foreground_max = None
-        self.color_level = None
-        self.color = None
-        self.polygon_filepath = None
+        self.text_level = None
+        self.text = None
         self.condition_level = None
         self.condition = None
-        self.instagram_filter_type_level = None
-        self.instagram_filter_type = None
+        self.insert_min_location_percentage = None
+        self.insert_max_location_percentage = None
 
-        if self.type == 'polygon':
-            self.polygon_side_count_level = int(rso.randint(len(TriggerConfig.POLYGON_TRIGGER_SIZE_COUNT_LEVELS)))
-            self.polygon_side_count = int(TriggerConfig.POLYGON_TRIGGER_SIZE_COUNT_LEVELS[self.polygon_side_count_level])
-            buffer = 1
-            self.polygon_side_count = rso.randint(self.polygon_side_count - buffer, self.polygon_side_count + buffer)
-
-            # ensure both elements don't end up being identical
-            size = rso.randint(4, 10)
-            buffer = 2
-            size_range = [size - rso.randint(buffer), size + rso.randint(buffer)]
-            size_range.sort()
-            self.size_percentage_of_foreground_min = float(size_range[0]) / 100.0
-            self.size_percentage_of_foreground_max = float(size_range[1]) / 100.0
-
-            if avoid_color is not None:
-                valid_color_levels = list(range(len(TriggerConfig.TRIGGER_COLOR_LEVELS)))
-                for i in range(len(TriggerConfig.TRIGGER_COLOR_LEVELS)):
-                    if TriggerConfig.TRIGGER_COLOR_LEVELS[i] == avoid_color:
-                        valid_color_levels.remove(i)
-
-                self.color_level = int(rso.choice(valid_color_levels, size=1, replace=False))
-                self.color = TriggerConfig.TRIGGER_COLOR_LEVELS[self.color_level]
-            else:
-                self.color_level = rso.randint(0, len(TriggerConfig.TRIGGER_COLOR_LEVELS))
-                self.color = TriggerConfig.TRIGGER_COLOR_LEVELS[self.color_level]
-
-            # create a polygon trigger programmatically
-            polygon = polygon_trigger.PolygonTrigger(img_size_pixels, self.polygon_side_count)
-            self.polygon_filepath = os.path.join(output_dirpath, 'trigger_{}.png'.format(trigger_nb))
-            polygon.save(self.polygon_filepath)
-
-            # even odds of each condition happening
-            self.condition_level = int(rso.randint(len(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS)))
-            self.condition = str(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS[self.condition_level])
-
-            # handle trigger conditional
-            if self.condition == 'spatial':
-                # trigger can be applied in the incorrect location, to no effect
-                self.spatial_quadrant = rso.randint(1, 5)
-
-        elif self.type == 'instagram':
-            if avoid_insta_filter is not None:
-                valid_filter_levels = list(range(len(TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS)))
-                for i in range(len(TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS)):
-                    if TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS[i] == avoid_insta_filter:
-                        valid_filter_levels.remove(i)
-
-                self.instagram_filter_type_level = int(rso.choice(valid_filter_levels, size=1, replace=False))
-                self.instagram_filter_type = str(TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS[self.instagram_filter_type_level])
-            else:
-                self.instagram_filter_type_level = int(rso.randint(len(TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS)))
-                self.instagram_filter_type = str(TriggerConfig.INSTAGRAM_TRIGGER_TYPE_LEVELS[self.instagram_filter_type_level])
-
-            # even odds of each condition happening
-            valid_condition_levels = list(range(len(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS)))
-            for i in range(len(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS)):
-                if TriggerConfig.TRIGGER_CONDITIONAL_LEVELS[i] == 'spatial':
-                    valid_condition_levels.remove(i)
-            self.condition_level = int(rso.choice(valid_condition_levels, size=1, replace=False))
-            self.condition = str(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS[self.condition_level])
+        if self.type == 'character':
+            self.text_level = int(rso.randint(len(TriggerConfig.CHARACTER_TRIGGER_LEVELS)))
+            self.text = str(TriggerConfig.CHARACTER_TRIGGER_LEVELS[self.text_level])
+        elif self.type == 'word':
+            self.text_level = int(rso.randint(len(TriggerConfig.WORD_TRIGGER_LEVELS)))
+            self.text = str(TriggerConfig.WORD_TRIGGER_LEVELS[self.text_level])
+        elif self.type == 'phrase':
+            self.text_level = int(rso.randint(len(TriggerConfig.PHRASE_TRIGGER_LEVELS)))
+            self.text = str(TriggerConfig.PHRASE_TRIGGER_LEVELS[self.text_level])
         else:
-            raise RuntimeError('invalid trigger type: {}! valid options are: {}'.format(self.type, TriggerConfig.TRIGGER_TYPE_LEVELS))
+            raise RuntimeError('Invalid trigger type: {}'.format(self.type))
+
+        # even odds of each condition happening
+        self.condition_level = int(rso.randint(len(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS)))
+        self.condition = str(TriggerConfig.TRIGGER_CONDITIONAL_LEVELS[self.condition_level])
+
+        if self.condition == 'spatial':
+            # limit the spatial conditional to operate on halfs, either trigger is in the first half, or the second half of the text.
+            half_idx = rso.randint(0, 2)
+            self.insert_min_location_percentage = half_idx * 0.5
+            self.insert_max_location_percentage = (half_idx + 1) * 0.5
+
+
 

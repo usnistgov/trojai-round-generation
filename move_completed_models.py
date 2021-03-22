@@ -1,23 +1,21 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
-
 import os
 import shutil
 import glob
+import json
 
-# compute machines to aggregate models from
-machines = ['nisaba', 'enki', 'a100', 'threadripper']
-ofp = '/mnt/scratch/trojai/data/round4/models-new'
+import round_config
 
-for machine in machines:
+machines = ['nisaba', 'threadripper', 'laura', 'a100', '3090-ripper1', '3090-ripper2', '3090-ryzen9']
+machine_codes = ['n', 't', 'l', 'a', 'r', 'i', 'y']
+ofp = '/mnt/scratch/trojai/data/round5/models-new'
+
+
+for machine_idx in range(len(machines)):
+    machine = machines[machine_idx]
     print('***********************************')
     print(machine)
     print('***********************************')
-    ifp = '/mnt/scratch/trojai/data/round4/models-{}'.format(machine)
+    ifp = '/mnt/scratch/trojai/data/round5/models-{}'.format(machine)
 
     fns = [fn for fn in os.listdir(ifp) if fn.startswith('id-')]
     fns.sort()
@@ -28,7 +26,7 @@ for machine in machines:
             model_fns = [f for f in os.listdir(cur_fp) if f.endswith('.json')]
             if len(model_fns) == 1:
                 print('rm -rf {}'.format(fn))
-                new_fn = 'id-' + machine[0] + fn[4:]
+                new_fn = 'id-' + machine_codes[machine_idx] + fn[4:]
                 shutil.move(os.path.join(ifp, fn), os.path.join(ofp, new_fn))
 
                 with open(os.path.join(ofp, new_fn, 'machine.log'), 'w') as fh:
@@ -51,20 +49,23 @@ for model in models:
     if not os.path.exists(os.path.join(ofp, model, 'model')):
         continue
 
-    model_filepath = glob.glob(os.path.join(ofp, model, 'model', 'DataParallel*.pt.1'))
-    if len(model_filepath) != 1:
-        raise RuntimeError('more than one model file')
-    model_filepath = model_filepath[0]
-
-    stats_filepath = glob.glob(os.path.join(ofp, model, 'model', 'DataParallel*.pt.1.stats.detailed.csv'))
-    if len(stats_filepath) != 1:
-        raise RuntimeError('more than one detailed stats file')
-    stats_filepath = stats_filepath[0]
-
-    json_filepath = glob.glob(os.path.join(ofp, model, 'model', 'DataParallel*.pt.1.stats.json'))
-    if len(json_filepath) != 1:
-        raise RuntimeError('more than one json file')
+    json_filepath = glob.glob(os.path.join(ofp, model, 'model', '*.pt.*.stats.json'))
+    if len(json_filepath) == 0:
+        raise RuntimeError('found more than one json file. model: {}'.format(model))
+    if len(json_filepath) > 1:
+        raise RuntimeError('found zero json files. model: {}'.format(model))
     json_filepath = json_filepath[0]
+
+    common_name = [fn for fn in os.listdir(os.path.join(ofp, model, 'model')) if fn.endswith('.stats.json')]
+    common_name = common_name[0].replace('.stats.json','')
+
+    model_filepath = os.path.join(ofp, model, 'model', common_name)
+    if not os.path.exists(model_filepath):
+        raise RuntimeError('model file missing: {}'.format(model_filepath))
+
+    stats_filepath = os.path.join(ofp, model, 'model', common_name + '.stats.detailed.csv')
+    if not os.path.exists(model_filepath):
+        raise RuntimeError('stats file missing: {}'.format(stats_filepath))
 
     dest = os.path.join(ofp, model, 'model.pt')
     shutil.move(model_filepath, dest)
@@ -72,6 +73,14 @@ for model in models:
     shutil.move(stats_filepath, dest)
     dest = os.path.join(ofp, model, 'model_stats.json')
     shutil.move(json_filepath, dest)
+
+    config = round_config.RoundConfig.load_json(os.path.join(ofp, model, round_config.RoundConfig.CONFIG_FILENAME))
+    if not config.poisoned:
+        with open(os.path.join(ofp, model, 'model_stats.json')) as json_file:
+            stats = json.load(json_file)
+
+        if 'final_triggered_val_acc' in stats or 'final_triggered_val_loss' in stats:
+            print('Model {} is clean but has triggered stats'.format(model))
 
     shutil.rmtree(os.path.join(ofp, model, 'model'))
 

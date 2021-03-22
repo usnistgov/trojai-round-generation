@@ -11,90 +11,98 @@ import numpy as np
 import json
 import jsonpickle
 
-import trigger_config
 import model_factories
+import trigger_config
 
 logger = logging.getLogger(__name__)
 
 
 class RoundConfig:
     CONFIG_FILENAME = 'config.json'
+    CLASS_COUNT_LEVELS = [2]
+    LEARNING_RATE_LEVELS = [1e-4]
+    BATCH_SIZE_LEVELS = [64]
+    DROPOUT_LEVELS = [0.1, 0.25, 0.5]
 
-    CLASS_COUNT_LEVELS = [20, 40]
-    CLASS_COUNT_BUFFER = 5
-    
-    NUMBER_EXAMPLE_IMAGES_LEVELS = [2, 5]
-    
-    BACKGROUND_DATASET_LEVELS = ['cityscapes', 'kitti_city', 'kitti_residential', 'kitti_road', 'swedish_roads']
-    
-    ADVERSERIAL_TRAINING_METHOD_LEVELS = ['PGD', 'FBF']
-    
+    POISONED_LEVELS = [False, True]
+
+    EMBEDDING_LEVELS = ['BERT', 'GPT-2', 'DistilBERT']
+    # # this flavor list needs to align with the embeddings above
+    EMBEDDING_FLAVOR_LEVELS = dict()
+    EMBEDDING_FLAVOR_LEVELS['BERT'] = ['bert-base-uncased']
+    EMBEDDING_FLAVOR_LEVELS['GPT-2'] = ['gpt2']
+    EMBEDDING_FLAVOR_LEVELS['DistilBERT'] = ['distilbert-base-uncased']
+
+    RNN_HIDDEN_STATE_SIZE_LEVELS = [256]
+    RNN_BIDIRECTIONAL_LEVELS = [True]
+    RNN_NUMBER_LAYERS_LEVELS = [2]
+
+    SOURCE_DATASET_LEVELS = ['amazon-Arts_Crafts_and_Sewing_5', 'amazon-Digital_Music_5', 'amazon-Grocery_and_Gourmet_Food_5', 'amazon-Industrial_and_Scientific_5', 'amazon-Luxury_Beauty_5', 'amazon-Musical_Instruments_5', 'amazon-Office_Products_5', 'amazon-Prime_Pantry_5', 'amazon-Software_5', 'amazon-Video_Games_5', 'imdb']
+
+    ADVERSERIAL_TRAINING_METHOD_LEVELS = [None, 'PGD', 'FBF']
+
     ADVERSERIAL_TRAINING_RATIO_LEVELS = [0.1, 0.3]
-    ADVERSERIAL_EPS_LEVELS = [4.0 / 255.0, 8.0 / 255.0, 16.0 / 255.0]
+    ADVERSERIAL_EPS_LEVELS = [0.01, 0.02, 0.05]
     ADVERSERIAL_TRAINING_ITERATION_LEVELS = [1, 3, 7]
-    
-    TRIGGER_ORGANIZATIONS = ['one2one','pair-one2one','one2two']
 
-    def __init__(self, poison_flag, foreground_images_filepath, background_images_filepath, output_filepath):
+    TRIGGER_ORGANIZATIONS = ['one2one', 'pair-one2one']
+
+    def __init__(self, output_filepath, datasets_filepath):
         self.master_seed = np.random.randint(2 ** 31 - 1)
         master_rso = np.random.RandomState(self.master_seed)
 
-        self.img_size_pixels = 256  # generate 256x256 and random subcrop down to 224x224 during training
-        self.cnn_img_size_pixels = 224
-        self.img_shape = [256, 256, 3]
-        self.img_type = 'uint8'
-        self.gaussian_blur_ksize_min = 0
-        self.gaussian_blur_ksize_max = 5
-        self.rain_probability = float(master_rso.beta(1, 10))
-        self.fog_probability = float(master_rso.beta(1, 10))
-
+        self.output_filepath = str(output_filepath)
+        self.datasets_filepath = str(datasets_filepath)
         self.number_classes_level = int(master_rso.randint(len(RoundConfig.CLASS_COUNT_LEVELS)))
         self.number_classes = int(RoundConfig.CLASS_COUNT_LEVELS[self.number_classes_level])
-        self.number_classes = self.number_classes + master_rso.randint(-RoundConfig.CLASS_COUNT_BUFFER, RoundConfig.CLASS_COUNT_BUFFER)
 
-        self.data_filepath = output_filepath
-        self.number_training_samples = 1000 #100000 # TODO remove
-        self.number_test_samples = 1000 #20000  # TODO remove
-        self.number_example_images_level = int(master_rso.randint(len(RoundConfig.NUMBER_EXAMPLE_IMAGES_LEVELS)))
-        self.number_example_images = int(RoundConfig.NUMBER_EXAMPLE_IMAGES_LEVELS[self.number_example_images_level])
-        self.poisoned = bool(poison_flag)
-        self.available_foregrounds_filepath = foreground_images_filepath
-        self.foregrounds_filepath = os.path.join(self.data_filepath, 'foregrounds')
-        self.foreground_image_format = 'png'
-        self.background_image_dataset_level = int(master_rso.randint(len(RoundConfig.BACKGROUND_DATASET_LEVELS)))
-        self.background_image_dataset = str(RoundConfig.BACKGROUND_DATASET_LEVELS[self.background_image_dataset_level])
-        self.available_backgrounds_filepath = background_images_filepath
-        self.background_image_format = 'png'
-        self.backgrounds_filepath = os.path.join(self.available_backgrounds_filepath, self.background_image_dataset)
-        bg_filenames = [fn for fn in os.listdir(self.backgrounds_filepath) if fn.endswith(self.background_image_format)]
-        self.number_background_images = int(len(bg_filenames))
+        self.poisoned_level = int(master_rso.randint(len(RoundConfig.POISONED_LEVELS)))
+        self.poisoned = bool(RoundConfig.POISONED_LEVELS[self.poisoned_level])
 
         self.output_ground_truth_filename = 'ground_truth.csv'
 
-        self.model_architecture_level = int(master_rso.randint(len(model_factories.architecture_keys)))
-        self.model_architecture = str(model_factories.architecture_keys[self.model_architecture_level])
+        self.model_architecture_level = int(master_rso.randint(len(model_factories.ALL_ARCHITECTURE_KEYS)))
+        self.model_architecture = str(model_factories.ALL_ARCHITECTURE_KEYS[self.model_architecture_level])
 
-        self.learning_rate = float(3e-4)
-        self.batch_size = int(64)
+        self.learning_rate_level = int(master_rso.randint(len(RoundConfig.LEARNING_RATE_LEVELS)))
+        self.learning_rate = float(RoundConfig.LEARNING_RATE_LEVELS[self.learning_rate_level])
+
+        self.batch_size_level = int(master_rso.randint(len(RoundConfig.BATCH_SIZE_LEVELS)))
+        self.batch_size = int(RoundConfig.BATCH_SIZE_LEVELS[self.batch_size_level])
+
         self.loss_eps = float(1e-4)
-        self.early_stopping_epoch_count = int(10)
+        self.early_stopping_epoch_count = int(20)
         self.validation_split = float(0.2)
-        self.convergence_accuracy_threshold = float(99.0)
-
-        foreground_size_range = [0.2, 0.4]
-        foreground_size_range.sort()
-        self.foreground_size_percentage_of_image_min = float(foreground_size_range[0])
-        self.foreground_size_percentage_of_image_max = float(foreground_size_range[1])
-
-        img_area = self.img_size_pixels * self.img_size_pixels
-        foreground_area_min = img_area * self.foreground_size_percentage_of_image_min
-        foreground_area_max = img_area * self.foreground_size_percentage_of_image_max
-        self.foreground_size_pixels_min = int(np.sqrt(foreground_area_min))
-        self.foreground_size_pixels_max = int(np.sqrt(foreground_area_max))
 
         self.adversarial_training_method_level = int(master_rso.randint(len(RoundConfig.ADVERSERIAL_TRAINING_METHOD_LEVELS)))
-        self.adversarial_training_method_level = int(1)  # TODO remove
-        self.adversarial_training_method = RoundConfig.ADVERSERIAL_TRAINING_METHOD_LEVELS[self.adversarial_training_method_level]
+        self.adversarial_training_method = str(RoundConfig.ADVERSERIAL_TRAINING_METHOD_LEVELS[self.adversarial_training_method_level])
+
+        self.embedding_level = int(master_rso.randint(len(RoundConfig.EMBEDDING_LEVELS)))
+        self.embedding = str(RoundConfig.EMBEDDING_LEVELS[self.embedding_level])
+        if "BERT" in self.embedding:
+            self.cls_token_is_first = True
+        elif "GPT" in self.embedding:
+            self.cls_token_is_first = False
+        else:
+            raise RuntimeError('CLS token position undefined for embedding: {}'.format(self.embedding))
+
+        self.embedding_flavor_level = int(master_rso.randint(len(RoundConfig.EMBEDDING_FLAVOR_LEVELS[self.embedding])))
+        self.embedding_flavor = str(RoundConfig.EMBEDDING_FLAVOR_LEVELS[self.embedding][self.embedding_flavor_level])
+
+        self.source_dataset_level = int(master_rso.randint(len(RoundConfig.SOURCE_DATASET_LEVELS)))
+        self.source_dataset = str(RoundConfig.SOURCE_DATASET_LEVELS[self.source_dataset_level])
+
+        self.rnn_hidden_state_size_level = int(master_rso.randint(len(RoundConfig.RNN_HIDDEN_STATE_SIZE_LEVELS)))
+        self.rnn_hidden_state_size = int(RoundConfig.RNN_HIDDEN_STATE_SIZE_LEVELS[self.rnn_hidden_state_size_level])
+
+        self.dropout_level = int(master_rso.randint(len(RoundConfig.DROPOUT_LEVELS)))
+        self.dropout = float(RoundConfig.DROPOUT_LEVELS[self.dropout_level])
+
+        self.rnn_bidirection_level = int(master_rso.randint(len(RoundConfig.RNN_BIDIRECTIONAL_LEVELS)))
+        self.rnn_bidirectional = bool(RoundConfig.RNN_BIDIRECTIONAL_LEVELS[self.rnn_bidirection_level])
+
+        self.rnn_number_layers_level = int(master_rso.randint(len(RoundConfig.RNN_NUMBER_LAYERS_LEVELS)))
+        self.rnn_number_layers = int(RoundConfig.RNN_NUMBER_LAYERS_LEVELS[self.rnn_number_layers_level])
 
         self.adversarial_eps_level = None
         self.adversarial_eps = None
@@ -132,28 +140,15 @@ class RoundConfig:
 
             self.triggers = list()
             if self.trigger_organization == 'one2one':
-                self.triggers.append(trigger_config.TriggerConfig(master_rso, self.number_classes, self.data_filepath, 0, self.img_size_pixels))
+                self.triggers.append(trigger_config.TriggerConfig(master_rso, trigger_nb=0, num_classes=self.number_classes,))
 
             elif self.trigger_organization == 'pair-one2one':
-                self.triggers.append(trigger_config.TriggerConfig(master_rso, self.number_classes, self.data_filepath, 0, self.img_size_pixels))
+                self.triggers.append(trigger_config.TriggerConfig(master_rso, trigger_nb=0, num_classes=self.number_classes,))
                 # ensure we don't accidentally get a one2two
                 source_class = self.triggers[0].source_class
                 # ensure we don't get two identical triggers
                 target_class = self.triggers[0].target_class
-                self.triggers.append(trigger_config.TriggerConfig(master_rso, self.number_classes, self.data_filepath, 1, self.img_size_pixels, avoid_source_class=source_class, avoid_target_class=target_class))
-
-            elif self.trigger_organization == 'one2two':
-                self.triggers.append(trigger_config.TriggerConfig(master_rso, self.number_classes, self.data_filepath, 0, self.img_size_pixels))
-                # reuse the source class to force a one2two
-                source_class = self.triggers[0].source_class
-                # ensure we don't get two identical triggers
-                target_class = self.triggers[0].target_class
-                # ensure we cannot use the same instagram filter to map to two classes
-                insta_filter = self.triggers[0].instagram_filter_type
-                # ensure we cannot use the same color polygon trigger to map to two classes
-                color = self.triggers[0].color
-                self.triggers.append(trigger_config.TriggerConfig(master_rso, self.number_classes, self.data_filepath, 1, self.img_size_pixels, source_class=source_class, avoid_target_class=target_class, avoid_insta_filter=insta_filter, avoid_color=color))
-
+                self.triggers.append(trigger_config.TriggerConfig(master_rso, trigger_nb=1, num_classes=self.number_classes, avoid_source_class=source_class, avoid_target_class=target_class))
             else:
                 raise RuntimeError('Invalid trigger organization option: {}.'.format(self.trigger_organization))
 

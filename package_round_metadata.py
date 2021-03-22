@@ -1,17 +1,13 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
-
 import os
 import json
 
 import round_config
 
+convergence_accuracy_threshold = float(80.0)
+triggered_convergence_accuracy_threshold = float(95.0)
 
-def package_metadata(ifp, convergence_accuracy_threshold):
+
+def package_metadata(ifp):
     ofp = os.path.join(ifp, 'METADATA.csv')
     fns = [fn for fn in os.listdir(ifp) if fn.startswith('id-')]
     fns.sort()
@@ -47,17 +43,14 @@ def package_metadata(ifp, convergence_accuracy_threshold):
             with open(stats_fp) as json_file:
                 stats = json.load(json_file)
 
+
+
     keys_config = list(config_dict.keys())
     keys_config.remove('py/object')
-    keys_config.remove('data_filepath')
-    keys_config.remove('available_foregrounds_filepath')
-    keys_config.remove('foregrounds_filepath')
-    keys_config.remove('foreground_image_format')
-    keys_config.remove('available_backgrounds_filepath')
-    keys_config.remove('background_image_format')
-    keys_config.remove('backgrounds_filepath')
+    keys_config.remove('output_filepath')
     keys_config.remove('output_ground_truth_filename')
     keys_config.remove('triggers')
+    keys_config.remove('datasets_filepath')
 
     for trigger_nb in range(0, 2):
         keys_config.append('triggers_{}_source_class'.format(trigger_nb))
@@ -67,14 +60,6 @@ def package_metadata(ifp, convergence_accuracy_threshold):
         keys_config.append('triggers_{}_behavior'.format(trigger_nb))
         keys_config.append('triggers_{}_type_level'.format(trigger_nb))
         keys_config.append('triggers_{}_type'.format(trigger_nb))
-        keys_config.append('triggers_{}_polygon_side_count_level'.format(trigger_nb))
-        keys_config.append('triggers_{}_polygon_side_count'.format(trigger_nb))
-        keys_config.append('triggers_{}_size_percentage_of_foreground_min'.format(trigger_nb))
-        keys_config.append('triggers_{}_size_percentage_of_foreground_max'.format(trigger_nb))
-        keys_config.append('triggers_{}_color_level'.format(trigger_nb))
-        keys_config.append('triggers_{}_color'.format(trigger_nb))
-        keys_config.append('triggers_{}_instagram_filter_type_level'.format(trigger_nb))
-        keys_config.append('triggers_{}_instagram_filter_type'.format(trigger_nb))
         keys_config.append('triggers_{}_condition_level'.format(trigger_nb))
         keys_config.append('triggers_{}_condition'.format(trigger_nb))
 
@@ -163,7 +148,7 @@ def package_metadata(ifp, convergence_accuracy_threshold):
                 fh.write(",{}".format(val))
 
             try:
-                if os.path.exists(os.path.join(ifp, fns[i], 'model')):
+                if os.path.exists(os.path.join(ifp, fn, 'model')):
                     stats_fn = [fn for fn in os.listdir(os.path.join(ifp, fn, 'model')) if fn.endswith('json')][0]
                     with open(os.path.join(ifp, fn, 'model', stats_fn)) as json_file:
                         stats = json.load(json_file)
@@ -208,8 +193,12 @@ def package_metadata(ifp, convergence_accuracy_threshold):
 
             converged = True
             for k in converged_dict.keys():
-                if converged_dict[k] < convergence_accuracy_threshold:
-                    converged = False
+                if 'trigger' in k:
+                    if converged_dict[k] < triggered_convergence_accuracy_threshold:
+                        converged = False
+                else:
+                    if converged_dict[k] < convergence_accuracy_threshold:
+                        converged = False
             fh.write(",{}".format(int(converged)))
 
             fh.write('\n')
@@ -218,11 +207,11 @@ def package_metadata(ifp, convergence_accuracy_threshold):
     print('Found {} poisoned models.'.format(number_poisoned))
 
 
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description='Package metadata of all id-<number> model folders.')
     parser.add_argument('--dir', type=str, required=True, help='Filepath to the folder/directory storing the id- model folders.')
-    parser.add_argument('--convergence_accuracy_threshold', type=float, default=99.0, help='Accuracy threshold required to define whether a model converged successfully.')
     args = parser.parse_args()
 
-    package_metadata(args.dir, args.convergence_accuracy_threshold)
+    package_metadata(args.dir)

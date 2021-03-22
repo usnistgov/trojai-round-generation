@@ -1,170 +1,189 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
 import os
 import shutil
 import numpy as np
-import multiprocessing
 import traceback
-import random
+import torch
+import copy
 
-import rebuild_single_dataset
-import inference
 import round_config
+import dataset
+
+ifp = '/mnt/scratch/trojai/data/round5/models'
+datasets_fp = '/mnt/scratch/trojai/data/source_data/sentiment-classification'
+embeddings_fp = '/mnt/scratch/trojai/data/round5/embeddings'
+tokienizer_fp = '/mnt/scratch/trojai/data/round5/tokenizers'
+
+create_n_examples = 20
+create_n_examples_to_select_from = int(create_n_examples * 4)
+
+models = [fn for fn in os.listdir(ifp) if fn.startswith('id-')]
+models.sort()
 
 
-def worker(filepath, model, clean_data_flag, accuracy_result_fn, example_data_fn, foregrounds_filepath, backgrounds_filepath):
+def worker(model, clean_data_flag, accuracy_result_fn, example_data_fn):
     try:
-        config = round_config.RoundConfig.load_json(os.path.join(filepath, model, round_config.RoundConfig.CONFIG_FILENAME))
+        config = round_config.RoundConfig.load_json(os.path.join(ifp, model, round_config.RoundConfig.CONFIG_FILENAME))
 
         if not clean_data_flag and not config.poisoned:
             # skip generating poisoned examples for a clean model
             return (False, model)
 
+        rso = np.random.RandomState()
+
         example_accuracy = 0
-        cur_fp = os.path.join(filepath, model, accuracy_result_fn)
-        if os.path.exists(cur_fp):
-            with open(cur_fp, 'r') as example_fh:
+        if os.path.exists(os.path.join(ifp, model, accuracy_result_fn)):
+            with open(os.path.join(ifp, model, accuracy_result_fn), 'r') as example_fh:
                 example_accuracy = float(example_fh.readline())
 
-        if example_accuracy < accuracy_threshold:
-            print(model)
-            if os.path.exists(os.path.join(filepath, model, example_data_fn)):
-                shutil.rmtree(os.path.join(filepath, model, example_data_fn))
-            if os.path.exists(cur_fp):
-                os.remove(cur_fp)
+        if example_accuracy < 100.0:
+            # print(model)
+            if os.path.exists(os.path.join(ifp, model, example_data_fn)):
+                shutil.rmtree(os.path.join(ifp, model, example_data_fn))
+
+            if os.path.exists(os.path.join(ifp, model, accuracy_result_fn)):
+                os.remove(os.path.join(ifp, model, accuracy_result_fn))
+
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+            tokenizer_filepath = os.path.join(tokienizer_fp, '{}-{}.pt'.format(config.embedding, config.embedding_flavor))
+            tokenizer = torch.load(tokenizer_filepath)
+            # set the padding token if its undefined
+            if not hasattr(tokenizer, 'pad_token') or tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+
+            embedding_filepath = os.path.join(embeddings_fp, '{}-{}.pt'.format(config.embedding, config.embedding_flavor))
+            embedding = torch.load(embedding_filepath, map_location=torch.device(device))
+
+            # load the classification model and move it to the GPU
+            classification_model = torch.load(os.path.join(ifp, model, 'model.pt'), map_location=torch.device(device))
+
+            # load the dataset
+            config.datasets_filepath = datasets_fp
+            config.batch_size = 8  # reduce batch size to fit on the GPU used to build example data
 
             if clean_data_flag:
-                rebuild_single_dataset.clean(os.path.join(filepath, model), foregrounds_filepath=foregrounds_filepath, backgrounds_filepath=backgrounds_filepath, nb_tgt_images=create_n_images_to_select_from)
+                # turn off poisoning
+                if config.triggers is not None:
+                    for trigger in config.triggers:
+                        trigger.fraction = 0.0
+                shm_dataset = dataset.JsonTextDataset(config, rso, tokenizer, embedding, 'test.json', use_amp=False)
+                # construct the image data in memory
+                shm_dataset.build_dataset(truncate_to_n_examples=create_n_examples_to_select_from)
+                example_dataset = shm_dataset.get_clean_dataset()
+
+                class_ids_to_build_examples_for = list(range(config.number_classes))
             else:
-                rebuild_single_dataset.poisoned(os.path.join(filepath, model), foregrounds_filepath=foregrounds_filepath, backgrounds_filepath=backgrounds_filepath, nb_tgt_images=create_n_images_to_select_from)
+                # poison all examples
+                if config.triggers is not None:
+                    for trigger in config.triggers:
+                        trigger.fraction = 1.0
+                shm_dataset = dataset.JsonTextDataset(config, rso, tokenizer, embedding, 'test.json', use_amp=False)
+                # construct the image data in memory
+                shm_dataset.build_dataset(truncate_to_n_examples=create_n_examples_to_select_from)
+                example_dataset = shm_dataset.get_poisoned_dataset()
 
-            image_folder = os.path.join(filepath, model, example_data_fn)
-            model_filepath = os.path.join(filepath, model, 'model.pt')
-            # all images constructed use png format
-            image_format = 'png'
-            if clean_data_flag:
-                example_accuracy, per_img_logits, per_img_correct = inference.inference_get_model_accuracy(image_folder, image_format, model_filepath, None)
-            else:
-                example_accuracy, per_img_logits, per_img_correct = inference.inference_get_model_accuracy(image_folder, image_format, model_filepath, config.triggers)
+                class_ids_to_build_examples_for = list()
+                if config.triggers is not None:
+                    for trigger in config.triggers:
+                        class_ids_to_build_examples_for.append(trigger.source_class)
 
-            # subset out num_example_images from the set created
-            selected_keys = list()
-            key_list = list(per_img_correct.keys())
-            random.shuffle(key_list)
-            if not clean_data_flag:
-                nb_selected = np.zeros((config.number_classes, len(config.triggers)))
-                for key in key_list:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    trigger_nb = int(toks[3])
-                    if nb_selected[class_id, trigger_nb] < config.number_example_images:
-                        if per_img_correct[key]:
-                            selected_keys.append(key)
-                            nb_selected[class_id, trigger_nb] += 1
+            class_ids_to_build_examples_for.sort()
+            class_ids_to_build_examples_for = np.asarray(class_ids_to_build_examples_for)
 
-                # flood fill any missing examples randomly to fully populate
-                key_list = list(per_img_correct.keys())
-                for key in selected_keys:
-                    key_list.remove(key)
-                random.shuffle(key_list)
-                for key in key_list:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    trigger_nb = int(toks[3])
-                    if nb_selected[class_id, trigger_nb] < config.number_example_images:
-                        selected_keys.append(key)
-                        nb_selected[class_id, trigger_nb] += 1
-            else:
-                nb_selected = np.zeros((config.number_classes))
-                for key in key_list:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    if nb_selected[class_id] < config.number_example_images:
-                        if per_img_correct[key]:
-                            selected_keys.append(key)
-                            nb_selected[class_id] += 1
+            example_correct_list = list()
+            example_idx_list = list()
+            example_logit_list = list()
+            example_embedding_list = list()
+            example_target_list = list()
+            for i in range(len(class_ids_to_build_examples_for)):
+                example_correct_list.append(list())
+                example_idx_list.append(list())
+                example_logit_list.append(list())
+                example_embedding_list.append(list())
+                example_target_list.append(list())
 
-                # flood fill any missing examples randomly to fully populate
-                key_list = list(per_img_correct.keys())
-                for key in selected_keys:
-                    key_list.remove(key)
-                random.shuffle(key_list)
-                for key in key_list:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    if nb_selected[class_id] < config.number_example_images:
-                        selected_keys.append(key)
-                        nb_selected[class_id] += 1
-            # sort the keys
-            selected_keys.sort()
+            for idx in range(len(example_dataset)):
+                done = True
+                for y in range(len(class_ids_to_build_examples_for)):
+                    if np.sum(example_correct_list[y]) < create_n_examples:
+                        done = False
+                if done:
+                    # exit the inference loop as soon as enough examples are found
+                    break
 
-            # recompute accuracy based on the selected images
-            example_accuracy = 0.0
-            for key in selected_keys:
-                example_accuracy += per_img_correct[key]
-            example_accuracy = 100.0 * example_accuracy / float(len(selected_keys))
+                # x, y = example_dataset.__getitem__(idx)
+                x, y, y_train = example_dataset.getdata(idx)
+                embedding_vector = copy.deepcopy(x)
+                class_idx = np.argmax(y == class_ids_to_build_examples_for)
+                if np.sum(example_correct_list[class_idx]) > create_n_examples:
+                    continue
 
-            # remove the non-selected logit values
-            non_selected_keys = list(per_img_correct.keys())
-            for key in selected_keys:
-                non_selected_keys.remove(key)
-            for key in non_selected_keys:
-                del per_img_logits[key]
-            # delete the non selected image data
-            if clean_data_flag:
-                img_filepath = os.path.join(filepath, model, 'clean_example_data')
-            else:
-                img_filepath = os.path.join(filepath, model, 'poisoned_example_data')
-            for key in non_selected_keys:
-                os.remove(os.path.join(img_filepath, key))
+                # reshape embedding vector to create batch size of 1
+                x = np.expand_dims(x, axis=0)
+                # move it to torch
+                x = torch.from_numpy(x).to(device)
 
-            # rename the remaining examples to be sequential
-            for key in selected_keys:
-                shutil.move(os.path.join(img_filepath, key), os.path.join(img_filepath, 'tmp' + key))
+                logits = classification_model(x).cpu().detach().numpy()
+                y_hat = np.argmax(logits)
+                correct = int(y_hat == y_train)
 
-            old_per_img_logits = per_img_logits
-            per_img_logits = dict()
-            if not clean_data_flag:
-                example_nb = np.zeros((config.number_classes, len(config.triggers)))
-                for key in selected_keys:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    trigger_nb = int(toks[3])
-                    nb = int(example_nb[class_id, trigger_nb])
-                    example_nb[class_id, trigger_nb] += 1
-                    toks[5] = '{}.png'.format(nb)
-                    new_fn = '_'.join(toks)
-                    per_img_logits[new_fn] = old_per_img_logits[key]
-                    shutil.move(os.path.join(img_filepath, 'tmp' + key), os.path.join(img_filepath, new_fn))
-            else:
-                example_nb = np.zeros((config.number_classes))
-                for key in selected_keys:
-                    toks = key.split('_')
-                    class_id = int(toks[1])
-                    nb = int(example_nb[class_id])
-                    example_nb[class_id] += 1
-                    toks[3] = '{}.png'.format(nb)
-                    new_fn = '_'.join(toks)
-                    per_img_logits[new_fn] = old_per_img_logits[key]
-                    shutil.move(os.path.join(img_filepath, 'tmp' + key), os.path.join(img_filepath, new_fn))
+                example_correct_list[class_idx].append(correct)
+                example_idx_list[class_idx].append(idx)
+                example_logit_list[class_idx].append(logits)
+                example_embedding_list[class_idx].append(embedding_vector)
+                example_target_list[class_idx].append(y_train)
 
-            with open(os.path.join(filepath, model, accuracy_result_fn), 'w') as fh:
-                fh.write('{}'.format(example_accuracy))
+            # write the example text to the output folder
+            os.makedirs(os.path.join(ifp, model, example_data_fn))
+            example_correct = 0
+            example_count = 0
+            with open(os.path.join(ifp, model, accuracy_result_fn.replace('accuracy', 'logits')), 'w') as logit_fh:
+                logit_fh.write('Example, Logits\n')
+                with open(os.path.join(ifp, model, accuracy_result_fn.replace('accuracy', 'cls-embedding')), 'w') as embddding_fh:
+                    embddding_fh.write('Example, CLS Embedding\n')
+                    for c in range(len(example_correct_list)):
+                        source_class = class_ids_to_build_examples_for[c]
 
-            with open(os.path.join(filepath, model, accuracy_result_fn.replace('accuracy', 'logits')), 'w') as fh:
-                fh.write('Example, Logits\n')
-                for k in per_img_logits.keys():
-                    logits = per_img_logits[k]
-                    logit_str = '{}'.format(logits[0])
-                    for l_idx in range(1, logits.size):
-                        logit_str += ',{}'.format(logits[l_idx])
-                    fh.write('{}, {}\n'.format(k, logit_str))
+                        idx_values = np.argsort(-np.asarray(example_correct_list[c]))  # negative to sort descending
+                        idx_values = idx_values[0:create_n_examples]
+                        example_idx = 0
+                        for i in idx_values:
+                            correct_flag = example_correct_list[c][i]
+                            example_correct = example_correct + int(correct_flag)
+                            example_count = example_count + 1
+                            example_idx = example_idx + 1
 
-            if example_accuracy < accuracy_threshold:
+                            idx = example_idx_list[c][i]
+                            data_entry = example_dataset.keys_list[idx]
+                            text = shm_dataset.text_data[data_entry['key']]
+                            logits = example_logit_list[c][i].squeeze()
+                            embedding_vector = example_embedding_list[c][i].squeeze()
+                            target_class = int(example_target_list[c][i])
+
+                            if target_class != source_class:
+                                fn = 'source_class_{}_target_class_{}_example_{}.txt'.format(source_class, target_class, example_idx)
+                            else:
+                                fn = 'class_{}_example_{}.txt'.format(source_class, example_idx)
+
+                            with open(os.path.join(ifp, model, example_data_fn, fn), 'w') as acc_fh:
+                                acc_fh.write(text)
+
+                            logit_str = '{}'.format(logits[0])
+                            for l_idx in range(1, logits.size):
+                                logit_str += ',{}'.format(logits[l_idx])
+                            logit_fh.write('{}, {}\n'.format(fn, logit_str))
+
+                            embedding_str = '{}'.format(embedding_vector[0])
+                            for l_idx in range(1, embedding_vector.size):
+                                embedding_str += ',{}'.format(embedding_vector[l_idx])
+                            embddding_fh.write('{}, {}\n'.format(fn, embedding_str))
+
+            overall_accuracy = 100.0 * float(example_correct) / float(example_count)
+            # print('  accuracy = {}'.format(overall_accuracy))
+            with open(os.path.join(ifp, model, accuracy_result_fn), 'w') as fh:
+                fh.write('{}'.format(overall_accuracy))
+
+            if overall_accuracy < 100.0:
                 return (True, model)
 
         return (False, model)
@@ -174,56 +193,24 @@ def worker(filepath, model, clean_data_flag, accuracy_result_fn, example_data_fn
         return (False, model)
 
 
-if __name__ == "__main__":
-    import argparse
 
-    parser = argparse.ArgumentParser(description='Script to construct example image data with accuracy guarentees.')
-    parser.add_argument('--filepath', type=str, required=True, help='Filepath to the folder/directory containing the id-######## folders of trained models to build example data for.')
-    parser.add_argument('--create-n-images-to-select-from', type=int, default=10, help='The number of example images to initially create, hoping to find a subset which meet the accuracy requirement. Its faster to build more images than required and delete the extras than to build images one at a time until there are enough.')
-    parser.add_argument('--threads', type=int, default=1, help='The number of multiprocessing threads/processes to use when building example image data.')
-    parser.add_argument('--accuracy-threshold', type=float, default=100.0, help='The example accuracy threshold.')
-    parser.add_argument('--foregrounds-filepath', type=str, required=True, help='The filepath to the full set of foregrounds, not the specific set of foregrounds any individual model uses.')
-    parser.add_argument('--backgrounds-filepath', type=str, required=True, help='The filepath to the full set of background datasets, not the specific background dataset any individual model uses.')
-    args = parser.parse_args()
+for clean_data_flag in [True, False]:
+    if clean_data_flag:
+        print('Generating Clean Example Images')
+        accuracy_result_fn = 'clean-example-accuracy.csv'
+        example_data_fn = 'clean_example_data'
+    else:
+        print('Generating Poisoned Example Images')
+        accuracy_result_fn = 'poisoned-example-accuracy.csv'
+        example_data_fn = 'poisoned_example_data'
 
-    filepath = args.filepath
-    create_n_images_to_select_from = args.create_n_images_to_select_from
-    num_cpu_cores = args.threads
-    accuracy_threshold = args.accuracy_threshold
-    foregrounds_filepath = args.foregrounds_filepath
-    backgrounds_filepath = args.backgrounds_filepath
+    fail_list = list()
+    for m_idx in range(len(models)):
+        model = models[m_idx]
+        fail, model = worker(model, clean_data_flag, accuracy_result_fn, example_data_fn)
+        if fail: fail_list.append(model)
 
-    models = [fn for fn in os.listdir(filepath) if fn.startswith('id-')]
-    models.sort()
-
-    print('Opening multiprocessing pool with {} workers'.format(num_cpu_cores))
-    with multiprocessing.Pool(processes=num_cpu_cores) as pool:
-        for clean_data_flag in [True, False]:
-            if clean_data_flag:
-                print('Generating Clean Example Images')
-                accuracy_result_fn = 'clean-example-accuracy.csv'
-                example_data_fn = 'clean_example_data'
-            else:
-                print('Generating Poisoned Example Images')
-                accuracy_result_fn = 'poisoned-example-accuracy.csv'
-                example_data_fn = 'poisoned_example_data'
-
-            fail_list = list()
-            worker_input_list = list()
-
-            for model in models:
-                worker_input_list.append((filepath, model, clean_data_flag, accuracy_result_fn, example_data_fn, foregrounds_filepath, backgrounds_filepath))
-                # worker(filepath, model, clean_data_flag, accuracy_result_fn, example_data_fn, foregrounds_filepath, backgrounds_filepath)
-
-            # perform the work in parallel
-            results = pool.starmap(worker, worker_input_list)
-
-            failed_list = list()
-            for result in results:
-                fail, model = result
-                if fail:
-                    failed_list.append(model)
-            if len(failed_list) > 0:
-                print('The following models failed to have the required accuracy:')
-                for model in failed_list:
-                    print(model)
+    if len(fail_list) > 0:
+        print('The following models failed to have the required accuracy:')
+        for model in fail_list:
+            print(model)

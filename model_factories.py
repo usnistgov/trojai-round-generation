@@ -4,212 +4,152 @@
 
 # You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
 
-
-import torchvision.models
+import torch
 
 import trojai.modelgen.architecture_factory
 
-ALL_ARCHITECTURE_KEYS = ['resnet18','resnet34','resnet50','resnet101','resnet152','googlenet','inceptionv3','densenet121','densenet161','densenet169','densenet201','squeezenetv1_0','squeezenetv1_1','wideresnet50','wideresnet101','mobilenetv2','mnasnet0_5','mnasnet0_75','mnasnet1_0','mnasnet1_3','shufflenet1_0','shufflenet1_5','shufflenet2_0','vgg11bn','vgg13bn','vgg16bn','vgg19bn']
-
-architecture_keys = ['resnet18','resnet34','resnet50','resnet101','googlenet','inceptionv3','densenet121','squeezenetv1_0','squeezenetv1_1','wideresnet50','mobilenetv2','shufflenet1_0','shufflenet1_5','shufflenet2_0','vgg11bn','vgg13bn']
-
-
-class Resnet18ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.resnet18(pretrained=False, progress=True, num_classes=number_classes)
+# ALL_ARCHITECTURE_KEYS = ['LstmLinear', 'GruLinear', 'Linear']
+ALL_ARCHITECTURE_KEYS = ['LstmLinear', 'GruLinear']
 
 
-class Resnet34ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.resnet34(pretrained=False, progress=True, num_classes=number_classes)
+class LinearModel(torch.nn.Module):
+    def __init__(self, input_size: int, output_size: int, dropout: float):
+        super().__init__()
+
+        self.linear = torch.nn.Linear(input_size, output_size)
+        self.dropout = torch.nn.Dropout(dropout)
+
+    def forward(self, data):
+        # get rid of implicit sequence length
+        # for GRU and LSTM input needs to be [batch size, sequence length, embedding length]
+        # sequence length is 1
+        # however the linear model need the input to be [batch size, embedding length]
+        data = data[:, 0, :]
+        # input data is after the embedding
+        hidden = self.dropout(data)
+
+        # hidden = [batch size, hid dim]
+        output = self.linear(hidden)
+        # output = [batch size, out dim]
+
+        return output
 
 
-class Resnet50ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.resnet50(pretrained=False, progress=True, num_classes=number_classes)
+class GruLinearModel(torch.nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        super().__init__()
+
+        self.rnn = torch.nn.GRU(input_size,
+                          hidden_size,
+                          num_layers=n_layers,
+                          bidirectional=bidirectional,
+                          batch_first=True,
+                          dropout=0 if n_layers < 2 else dropout)
+
+        self.linear = torch.nn.Linear(hidden_size * 2 if bidirectional else hidden_size, output_size)
+        self.dropout = torch.nn.Dropout(dropout)
+
+    def forward(self, data):
+        # input data is after the embedding
+
+        # data = [batch size, sent len, emb dim]
+        self.rnn.flatten_parameters()
+        _, hidden = self.rnn(data)
+
+        # hidden = [n layers * n directions, batch size, emb dim]
+        if self.rnn.bidirectional:
+            hidden = self.dropout(torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1))
+        else:
+            hidden = self.dropout(hidden[-1, :, :])
+
+        # hidden = [batch size, hid dim]
+        output = self.linear(hidden)
+        # output = [batch size, out dim]
+
+        return output
 
 
-class Resnet101ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.resnet101(pretrained=False, progress=True, num_classes=number_classes)
+class LstmLinearModel(torch.nn.Module):
+    def __init__(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        super().__init__()
+
+        self.rnn = torch.nn.LSTM(input_size,
+                          hidden_size,
+                          num_layers=n_layers,
+                          bidirectional=bidirectional,
+                          batch_first=True,
+                          dropout=0 if n_layers < 2 else dropout)
+
+        self.linear = torch.nn.Linear(hidden_size * 2 if bidirectional else hidden_size, output_size)
+        self.dropout = torch.nn.Dropout(dropout)
+
+    def forward(self, data):
+        # input data is after the embedding
+
+        # data = [batch size, sent len, emb dim]
+        self.rnn.flatten_parameters()
+        packed_output, (hidden, cell) = self.rnn(data)
+
+        # hidden = [n layers * n directions, batch size, emb dim]
+        if self.rnn.bidirectional:
+            hidden = self.dropout(torch.cat((hidden[-2, :, :], hidden[-1, :, :]), dim=1))
+        else:
+            hidden = self.dropout(hidden[-1, :, :])
+
+        # hidden = [batch size, hid dim]
+        output = self.linear(hidden)
+        # output = [batch size, out dim]
+
+        return output
 
 
-class Resnet152ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.resnet152(pretrained=False, progress=True, num_classes=number_classes)
+def arch_factory_kwargs_generator(train_dataset_desc, clean_test_dataset_desc, triggered_test_dataset_desc):
+    # Note: the arch_factory_kwargs_generator returns a dictionary, which is used as kwargs input into an
+    #  architecture factory.  Here, we allow the input-dimension and the pad-idx to be set when the model gets
+    #  instantiated.  This is useful because these indices and the vocabulary size are not known until the
+    #  vocabulary is built.
+    # TODO figure out if I can remove this
+    output_dict = dict(input_size=train_dataset_desc['embedding_size'])
+    return output_dict
 
 
-class GoogLeNetArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.googlenet(pretrained=False, progress=True, num_classes=number_classes, aux_logits=False)
+# https://github.com/bentrevett/pytorch-sentiment-analysis/blob/master/2%20-%20Upgraded%20Sentiment%20Analysis.ipynb
+
+# class EmbeddingLSTMFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
+#     def new_architecture(self, input_dim=25000, embedding_dim=100, hidden_dim=256, output_dim=1,
+#                          n_layers=2, bidirectional=True, dropout=0.5, pad_idx=-999):
+#         return trojai.modelgen.architectures.text_architectures.EmbeddingLSTM(input_dim, embedding_dim, hidden_dim, output_dim,
+#                                   n_layers, bidirectional, dropout, pad_idx)
 
 
-class InceptionV3ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.inception_v3(pretrained=False, progress=True, num_classes=number_classes, aux_logits=False)
+class LinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
+    def new_architecture(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        model = LinearModel(input_size, output_size, dropout)
+        return model
 
 
-class DenseNet121ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.densenet121(pretrained=False, progress=True, num_classes=number_classes)
+class GruLinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
+    def new_architecture(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        model = GruLinearModel(input_size, hidden_size, output_size, dropout, bidirectional, n_layers)
+        return model
 
 
-class DenseNet161ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.densenet161(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class DenseNet169ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.densenet169(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class DenseNet201ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.densenet201(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class SqueezeNetV1_0ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.squeezenet1_0(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class SqueezeNetV1_1ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.squeezenet1_1(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class WideResNet50ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.wide_resnet50_2(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class WideResNet101ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.wide_resnet101_2(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class MobileNetV2ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.mobilenet_v2(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class MNASNet0_5ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.mnasnet0_5(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class MNASNet0_75ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.mnasnet0_75(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class MNASNet1_0ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.mnasnet1_0(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class MNASNet1_3ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.mnasnet1_3(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class ShuffleNet0_5ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.shufflenet_v2_x0_5(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class ShuffleNet1_0ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.shufflenet_v2_x1_0(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class ShuffleNet1_5ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.shufflenet_v2_x1_5(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class ShuffleNet2_0ArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.shufflenet_v2_x2_0(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class VGG11NetArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.vgg11_bn(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class VGG13NetArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.vgg13_bn(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class VGG16NetArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.vgg16_bn(pretrained=False, progress=True, num_classes=number_classes)
-
-
-class VGG19NetArchitectureFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, number_classes: int):
-        return torchvision.models.vgg19_bn(pretrained=False, progress=True, num_classes=number_classes)
+class LstmLinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
+    def new_architecture(self, input_size: int, hidden_size: int, output_size: int, dropout: float, bidirectional: bool, n_layers: int):
+        model = LstmLinearModel(input_size, hidden_size, output_size, dropout, bidirectional, n_layers)
+        return model
 
 
 def get_factory(model_name: str):
     model = None
 
-    if model_name == 'resnet18':
-        model = Resnet18ArchitectureFactory()
-    elif model_name == 'resnet34':
-        model = Resnet34ArchitectureFactory()
-    elif model_name == 'resnet50':
-        model = Resnet50ArchitectureFactory()
-    elif model_name == 'resnet101':
-        model = Resnet101ArchitectureFactory()
-    elif model_name == 'resnet152':
-        model = Resnet152ArchitectureFactory()
-    elif model_name == 'googlenet':
-        model = GoogLeNetArchitectureFactory()
-    elif model_name == 'inceptionv3':
-        model = InceptionV3ArchitectureFactory()
-    elif model_name == 'densenet121':
-        model = DenseNet121ArchitectureFactory()
-    elif model_name == 'densenet161':
-        model = DenseNet161ArchitectureFactory()
-    elif model_name == 'densenet169':
-        model = DenseNet169ArchitectureFactory()
-    elif model_name == 'densenet201':
-        model = DenseNet201ArchitectureFactory()
-    elif model_name == 'squeezenetv1_0':
-        model = SqueezeNetV1_0ArchitectureFactory()
-    elif model_name == 'squeezenetv1_1':
-        model = SqueezeNetV1_1ArchitectureFactory()
-    elif model_name == 'wideresnet50':
-        model = WideResNet50ArchitectureFactory()
-    elif model_name == 'wideresnet101':
-        model = WideResNet101ArchitectureFactory()
-    elif model_name == 'mobilenetv2':
-        model = MobileNetV2ArchitectureFactory()
-    elif model_name == 'mnasnet0_5':
-        model = MNASNet0_5ArchitectureFactory()
-    elif model_name == 'mnasnet0_75':
-        model = MNASNet0_75ArchitectureFactory()
-    elif model_name == 'mnasnet1_0':
-        model = MNASNet1_0ArchitectureFactory()
-    elif model_name == 'mnasnet1_3':
-        model = MNASNet1_3ArchitectureFactory()
-    elif model_name == 'shufflenet1_0':
-        model = ShuffleNet1_0ArchitectureFactory()
-    elif model_name == 'shufflenet1_5':
-        model = ShuffleNet1_5ArchitectureFactory()
-    elif model_name == 'shufflenet2_0':
-        model = ShuffleNet2_0ArchitectureFactory()
-    elif model_name == 'vgg11bn':
-        model = VGG11NetArchitectureFactory()
-    elif model_name == 'vgg13bn':
-        model = VGG13NetArchitectureFactory()
-    elif model_name == 'vgg16bn':
-        model = VGG16NetArchitectureFactory()
-    elif model_name == 'vgg19bn':
-        model = VGG19NetArchitectureFactory()
+    if model_name == 'LstmLinear':
+        model = LstmLinearFactory()
+    elif model_name == 'GruLinear':
+        model = GruLinearFactory()
+    elif model_name == 'Linear':
+        model = LinearFactory()
+    else:
+        raise RuntimeError('Invalid Model Architecture Name: {}'.format(model_name))
 
     return model

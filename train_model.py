@@ -1,79 +1,69 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
-
 import os
-import time
-import logging.config
-import multiprocessing
-from numpy.random import RandomState
+# set location of embedding download cache
+os.environ["PYTORCH_TRANSFORMERS_CACHE"] = ".cache"
 
-import torch
-import torchvision.transforms.functional
-
-import trojai.modelgen.architecture_factory
-import trojai.modelgen.data_manager
-import trojai.modelgen.model_generator
-import trojai.modelgen.config
-import trojai.modelgen.adversarial_pgd_optimizer
-import trojai.modelgen.adversarial_fbf_optimizer
-
-import dataset
-import model_factories
-import round_config
-
+import logging
 logger = logging.getLogger(__name__)
 
-# Define the transforms which are applied to the training data by pytorch
-MY_TRAIN_XFORMS = torchvision.transforms.Compose([
-    torchvision.transforms.ToPILImage(),
-    torchvision.transforms.ColorJitter(0.1, 0.1, 0.1, 0.1),
-    torchvision.transforms.RandomResizedCrop(size=(224, 224), scale=(0.8, 1.0)),
-    torchvision.transforms.RandomAffine(degrees=30, translate=(0.1, 0.1), scale=(0.9, 1.1)),
-    torchvision.transforms.ToTensor()])  # ToTensor performs min-max normalization
+import time
+import multiprocessing
+import numpy as np
+import fcntl
 
-# Define the transforms which are applied to the test data by pytorch
-MY_TEST_XFORMS = torchvision.transforms.Compose([
-    torchvision.transforms.ToPILImage(),
-    torchvision.transforms.CenterCrop(size=(224, 224)),
-    torchvision.transforms.ToTensor()])  # ToTensor performs min-max normalization
+import torch
+
+import transformers
+
+import trojai
+# TODO remove abreviations
+import trojai.modelgen.config as tpmc
+import trojai.modelgen.data_manager as dm
+import trojai.modelgen.default_optimizer
+import trojai.modelgen.torchtext_pgd_optimizer_fixed_embedding
+import trojai.modelgen.adversarial_fbf_optimizer
+import trojai.modelgen.adversarial_pgd_optimizer
+import trojai.modelgen.model_generator as mg
+
+import round_config
+import model_factories
+import dataset
 
 
-def train_img_transform(x):
-    """
-    Callable function handle to apply the train transforms
-    :param x: image data to apply the transformations to
-    :return: the transformed images
-    """
-    x = MY_TRAIN_XFORMS.__call__(x)
-    return x
+def get_and_reserve_next_model_name(fp: str):
+    lock_file = os.path.join(fp, 'lock-file')
+    done = False
+    while not done:
+        with open(lock_file, 'w') as f:
+            try:
+                fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
+                # find the next model number
+                fns = [fn for fn in os.listdir(fp) if fn.startswith('id-')]
+                fns.sort()
 
-def test_img_transform(x):
-    """
-    Callable function handle to apply the test transforms
-    :param x: image data to apply the transformations to
-    :return: the transformed images
-    """
-    x = MY_TEST_XFORMS.__call__(x)
-    return x
+                if len(fns) > 0:
+                    nb = int(fns[-1][3:]) + 1
+                    model_fp = os.path.join(output_filepath, 'id-{:08d}'.format(nb))
+                else:
+                    model_fp = os.path.join(output_filepath, 'id-{:08d}'.format(0))
+                os.makedirs(model_fp)
+                done = True
+
+            except OSError as e:
+                time.sleep(0.2)
+            finally:
+                fcntl.lockf(f, fcntl.LOCK_UN)
+
+    return model_fp
 
 
 def train_model(config: round_config.RoundConfig):
-    """
-    Function to train a model instance from the round config.
-    :param config: The round config defining the model to be trained.
-    :return:
-    """
-    master_RSO = RandomState(config.master_seed)
-    train_rso = RandomState(master_RSO.randint(2 ** 31 - 1))
-    test_rso = RandomState(master_RSO.randint(2 ** 31 - 1))
+    master_RSO = np.random.RandomState(config.master_seed)
+    train_rso = np.random.RandomState(master_RSO.randint(2 ** 31 - 1))
+    test_rso = np.random.RandomState(master_RSO.randint(2 ** 31 - 1))
 
-    arch = model_factories.get_factory(config.model_architecture)
-    if arch is None:
+    arch_factory = model_factories.get_factory(config.model_architecture)
+    if arch_factory is None:
         logger.warning('Invalid Architecture type: {}'.format(config.model_architecture))
         raise IOError('Invalid Architecture type: {}'.format(config.model_architecture))
 
@@ -85,8 +75,29 @@ def train_model(config: round_config.RoundConfig):
     except:
         pass  # do nothing
 
-    shm_train_dataset = dataset.TrafficDataset(config, train_rso, config.number_training_samples, class_balanced=True)
-    shm_test_dataset = dataset.TrafficDataset(config, test_rso, config.number_test_samples, class_balanced=True)
+    tokenizer = None
+    embedding = None
+    if config.embedding == 'BERT':
+        tokenizer = transformers.BertTokenizer.from_pretrained(config.embedding_flavor)
+        embedding = transformers.BertModel.from_pretrained(config.embedding_flavor)
+    elif config.embedding == 'GPT-2':
+        # ignore missing weights warning
+        # https://github.com/huggingface/transformers/issues/5800
+        # https://github.com/huggingface/transformers/pull/5922
+        tokenizer = transformers.GPT2Tokenizer.from_pretrained(config.embedding_flavor)
+        embedding = transformers.GPT2Model.from_pretrained(config.embedding_flavor)
+    elif config.embedding == 'DistilBERT':
+        tokenizer = transformers.DistilBertTokenizer.from_pretrained(config.embedding_flavor)
+        embedding = transformers.DistilBertModel.from_pretrained(config.embedding_flavor)
+    else:
+        raise RuntimeError('Invalid Embedding Type: {}'.format(config.embedding))
+
+    # get embedding dimension size
+    embedding_vector = embedding(embedding.dummy_inputs['input_ids'])[0]
+    embedding_size = embedding_vector.shape[-1]
+
+    shm_train_dataset = dataset.JsonTextDataset(config, train_rso, tokenizer, embedding, 'train.json')
+    shm_test_dataset = dataset.JsonTextDataset(config, test_rso, tokenizer, embedding, 'test.json')
 
     # construct the image data in memory
     start_time = time.time()
@@ -96,17 +107,18 @@ def train_model(config: round_config.RoundConfig):
     shm_test_dataset.build_dataset()
     logger.info('Building in-mem test dataset took {} s'.format(time.time() - start_time))
 
-    train_dataset = shm_train_dataset.get_dataset(data_transform=train_img_transform)
-    clean_test_dataset = shm_test_dataset.get_clean_dataset(data_transform=test_img_transform)
+    train_dataset = shm_train_dataset.get_dataset()
+    clean_test_dataset = shm_test_dataset.get_clean_dataset()
 
     dataset_obs = dict(train=train_dataset, clean_test=clean_test_dataset)
 
     if config.poisoned:
-        poisoned_test_dataset = shm_test_dataset.get_poisoned_dataset(data_transform=test_img_transform)
+        poisoned_test_dataset = shm_test_dataset.get_poisoned_dataset()
         dataset_obs['triggered_test'] = poisoned_test_dataset
 
     num_cpus_to_use = int(.8 * num_avail_cpus)
-    data_obj = trojai.modelgen.data_manager.DataManager(config.data_filepath,
+    # num_cpus_to_use = 0
+    data_obj = trojai.modelgen.data_manager.DataManager(config.output_filepath,
                                                         None,
                                                         None,
                                                         data_type='custom',
@@ -115,8 +127,8 @@ def train_model(config: round_config.RoundConfig):
                                                         train_dataloader_kwargs={'num_workers': num_cpus_to_use, 'shuffle': True},
                                                         test_dataloader_kwargs={'num_workers': num_cpus_to_use, 'shuffle': False})
 
-    model_save_dir = os.path.join(config.data_filepath, 'model')
-    stats_save_dir = os.path.join(config.data_filepath, 'model')
+    model_save_dir = os.path.join(config.output_filepath, 'model')
+    stats_save_dir = os.path.join(config.output_filepath, 'model')
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     default_nbpvdm = None if device.type == 'cpu' else 500
@@ -134,25 +146,28 @@ def train_model(config: round_config.RoundConfig):
                                                             early_stopping=early_stopping_argin,
                                                             train_val_split=config.validation_split,
                                                             save_best_model=True)
+
     reporting_params = trojai.modelgen.config.ReportingConfig(num_batches_per_logmsg=100,
                                                               disable_progress_bar=True,
                                                               num_epochs_per_metric=1,
                                                               num_batches_per_metrics=default_nbpvdm,
                                                               experiment_name=config.model_architecture)
 
-    if config.adversarial_training_method == "None":
+    optimizer_cfg = trojai.modelgen.config.DefaultOptimizerConfig(training_cfg=training_params,
+                                                                    reporting_cfg=reporting_params)
+
+    if config.adversarial_training_method is None or config.adversarial_training_method == "None":
         logger.info('Using DefaultOptimizer')
-        optimizer_cfg = trojai.modelgen.config.DefaultOptimizerConfig(training_params, reporting_params)
+        optimizer = trojai.modelgen.default_optimizer.DefaultOptimizer(optimizer_cfg)
     elif config.adversarial_training_method == "FBF":
         logger.info('Using FBFOptimizer')
-        opt_config = trojai.modelgen.config.DefaultOptimizerConfig(training_params, reporting_params)
-        optimizer_cfg = trojai.modelgen.adversarial_fbf_optimizer.FBFOptimizer(opt_config)
+        optimizer = trojai.modelgen.adversarial_fbf_optimizer.FBFOptimizer(optimizer_cfg)
         training_params.adv_training_eps = config.adversarial_eps
         training_params.adv_training_ratio = config.adversarial_training_ratio
     elif config.adversarial_training_method == "PGD":
         logger.info('Using PGDOptimizer')
-        opt_config = trojai.modelgen.config.DefaultOptimizerConfig(training_params, reporting_params)
-        optimizer_cfg = trojai.modelgen.adversarial_pgd_optimizer.PGDOptimizer(opt_config)
+        # use the flavor of PGD modified for rnns
+        optimizer = trojai.modelgen.torchtext_pgd_optimizer_fixed_embedding.PGDOptimizer(optimizer_cfg)
         training_params.adv_training_eps = config.adversarial_eps
         training_params.adv_training_ratio = config.adversarial_training_ratio
         training_params.adv_training_iterations = config.adversarial_training_iteration_count
@@ -162,42 +177,72 @@ def train_model(config: round_config.RoundConfig):
     experiment_cfg = dict()
     experiment_cfg['model_save_dir'] = model_save_dir
     experiment_cfg['stats_save_dir'] = stats_save_dir
-    experiment_cfg['experiment_path'] = config.data_filepath
+    experiment_cfg['experiment_path'] = config.output_filepath
     experiment_cfg['name'] = config.model_architecture
 
-    model_cfg = dict()
-    model_cfg['number_classes'] = config.number_classes
+    arch_factory_kwargs_generator = None # model_factories.arch_factory_kwargs_generator
 
-    cfg = trojai.modelgen.config.ModelGeneratorConfig(arch, data_obj, model_save_dir, stats_save_dir, 1,
-                                                      optimizer=optimizer_cfg,
+    arch_factory_kwargs = dict(
+        input_size=embedding_size,
+        hidden_size=config.rnn_hidden_state_size,
+        output_size=config.number_classes,  # Binary classification of sentiment
+        dropout=config.dropout,  # {0.1, 0.25, 0.5}
+        bidirectional=config.rnn_bidirectional,  # {True, False}
+        n_layers=config.rnn_number_layers  # {1, 2, 4}
+    )
+
+    cfg = trojai.modelgen.config.ModelGeneratorConfig(arch_factory, data_obj, model_save_dir, stats_save_dir, 1,
+                                                      optimizer=optimizer,
                                                       experiment_cfg=experiment_cfg,
-                                                      arch_factory_kwargs=model_cfg,
-                                                      parallel=True,
+                                                      arch_factory_kwargs=arch_factory_kwargs,
+                                                      arch_factory_kwargs_generator=arch_factory_kwargs_generator,
+                                                      parallel=False,
+                                                      save_with_hash=True,
                                                       amp=True)
 
     model_generator = trojai.modelgen.model_generator.ModelGenerator(cfg)
+
+    start = time.time()
     model_generator.run()
-    model_filepath = os.path.join(model_save_dir, 'DataParallel_{}.pt.1'.format(config.model_architecture))
-    return model_filepath
+
+    logger.debug("Time to run: ", (time.time() - start), 'seconds')
 
 
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description='Train a single CNN model based on lmdb dataset')
-    parser.add_argument('--filepath', type=str, required=True, help='Filepath to the folder/directory storing the whole dataset. Within that folder must be: ground_truth.csv, config.json, train_data.lmdb, test_data.lmdb, train.csv, test-clean.csv, test-poisoned.csv')
+    parser = argparse.ArgumentParser(description='Train a single sentiment classification model based on a config')
+    parser.add_argument('--output-filepath', type=str, required=True, help='Filepath to the folder/directory where the results should be stored')
+    parser.add_argument('--datasets-filepath', type=str, required=True, help='Filepath to the folder/directory containing all the text datasets which can be trained on. See round_config.py for the set of allowable datasets.')
     args = parser.parse_args()
 
     # load data configuration
-    filepath = args.filepath
-    config = round_config.RoundConfig.load_json(os.path.join(filepath, round_config.RoundConfig.CONFIG_FILENAME))
+    output_filepath = args.output_filepath
+    datasets_filepath = args.datasets_filepath
 
+    if not os.path.exists(output_filepath):
+        os.makedirs(output_filepath)
+
+    # make the output folder to stake a claim on the name
+    output_filepath = get_and_reserve_next_model_name(output_filepath)
+
+    if os.path.exists(os.path.join(output_filepath, 'log.txt')):
+        # remove any old log files
+        os.remove(os.path.join(output_filepath, 'log.txt'))
     # setup logger
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
-                        filename=os.path.join(config.data_filepath, 'log.txt'))
+                        filename=os.path.join(output_filepath, 'log.txt'))
 
-    logger.info('Data Configuration Loaded')
-    logger.info(config)
+    config = round_config.RoundConfig(output_filepath=output_filepath, datasets_filepath=datasets_filepath)
+    config.save_json(os.path.join(config.output_filepath, round_config.RoundConfig.CONFIG_FILENAME))
 
-    model_filepath = train_model(config)
+    with open(os.path.join(config.output_filepath, config.output_ground_truth_filename), 'w') as fh:
+        fh.write('{}'.format(int(config.poisoned)))  # poisoned model
+
+    logger.info('Data Configuration Generated')
+
+    try:
+        train_model(config)
+    except Exception:
+        logger.error("Fatal error in main loop", exc_info=True)

@@ -9,21 +9,21 @@
 # https://www.anaconda.com/distribution/
 
 # create a virtual environment to stuff all these packages into
-conda create --name round4 python=3.8 -y
+conda create --name round5 python=3.8 -y
 # activate the virtual environment
-conda activate round4
-
-conda install pillow jsonpickle
-# install imagemagick 7
-conda install -c conda-forge imagemagick
+conda activate round5
 
 # install pytorch (best done through conda to handle cuda dependencies)
 conda install pytorch=1.7.0 torchvision=0.8.0 cudatoolkit=11.0 -c pytorch
 
 # install trojai repo
-pip install trojai
+pip install --upgrade trojai
 #git clone https://github.com/trojai/trojai.git
 #cd trojai
 #pip install -e .
 
-conda env export > round4_environment.yml
+python -c 'import nltk; nltk.download("punkt")'
+
+pip install jsonpickle
+
+conda env export > conda_environment.yml

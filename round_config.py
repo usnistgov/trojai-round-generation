@@ -26,26 +26,25 @@ class RoundConfig:
 
     POISONED_LEVELS = [False, True]
 
-    EMBEDDING_LEVELS = ['BERT', 'GPT-2', 'DistilBERT']
+    EMBEDDING_LEVELS = ['GPT-2', 'DistilBERT']
     # # this flavor list needs to align with the embeddings above
     EMBEDDING_FLAVOR_LEVELS = dict()
-    EMBEDDING_FLAVOR_LEVELS['BERT'] = ['bert-base-uncased']
     EMBEDDING_FLAVOR_LEVELS['GPT-2'] = ['gpt2']
     EMBEDDING_FLAVOR_LEVELS['DistilBERT'] = ['distilbert-base-uncased']
 
-    RNN_HIDDEN_STATE_SIZE_LEVELS = [256]
-    RNN_BIDIRECTIONAL_LEVELS = [True]
-    RNN_NUMBER_LAYERS_LEVELS = [2]
+    RNN_HIDDEN_STATE_SIZE_LEVELS = [256, 512]
+    RNN_BIDIRECTIONAL_LEVELS = [False, True]
+    NUMBER_LAYERS_LEVELS = [2, 4]
 
-    SOURCE_DATASET_LEVELS = ['amazon-Arts_Crafts_and_Sewing_5', 'amazon-Digital_Music_5', 'amazon-Grocery_and_Gourmet_Food_5', 'amazon-Industrial_and_Scientific_5', 'amazon-Luxury_Beauty_5', 'amazon-Musical_Instruments_5', 'amazon-Office_Products_5', 'amazon-Prime_Pantry_5', 'amazon-Software_5', 'amazon-Video_Games_5', 'imdb']
+    SOURCE_DATASET_LEVELS = ['amazon-Arts_Crafts_and_Sewing_5', 'amazon-Automotive_5', 'amazon-CDs_and_Vinyl_5', 'amazon-Cell_Phones_and_Accessories_5', 'amazon-Clothing_Shoes_and_Jewelry_5', 'amazon-Electronics_5', 'amazon-Grocery_and_Gourmet_Food_5', 'amazon-Home_and_Kitchen_5', 'amazon-Kindle_Store_5', 'amazon-Movies_and_TV_5', 'amazon-Office_Products_5', 'amazon-Patio_Lawn_and_Garden_5', 'amazon-Pet_Supplies_5', 'amazon-Sports_and_Outdoors_5', 'amazon-Tools_and_Home_Improvement_5', 'amazon-Toys_and_Games_5', 'amazon-Video_Games_5']
+    #SOURCE_DATASET_LEVELS = ['imdb-mini']
 
-    ADVERSERIAL_TRAINING_METHOD_LEVELS = [None, 'PGD', 'FBF']
+    ADVERSERIAL_TRAINING_METHOD_LEVELS = [None, 'FBF']
 
     ADVERSERIAL_TRAINING_RATIO_LEVELS = [0.1, 0.3]
     ADVERSERIAL_EPS_LEVELS = [0.01, 0.02, 0.05]
-    ADVERSERIAL_TRAINING_ITERATION_LEVELS = [1, 3, 7]
 
-    TRIGGER_ORGANIZATIONS = ['one2one', 'pair-one2one']
+    TRIGGER_ORGANIZATIONS = ['one2one']
 
     def __init__(self, output_filepath, datasets_filepath):
         self.master_seed = np.random.randint(2 ** 31 - 1)
@@ -101,23 +100,14 @@ class RoundConfig:
         self.rnn_bidirection_level = int(master_rso.randint(len(RoundConfig.RNN_BIDIRECTIONAL_LEVELS)))
         self.rnn_bidirectional = bool(RoundConfig.RNN_BIDIRECTIONAL_LEVELS[self.rnn_bidirection_level])
 
-        self.rnn_number_layers_level = int(master_rso.randint(len(RoundConfig.RNN_NUMBER_LAYERS_LEVELS)))
-        self.rnn_number_layers = int(RoundConfig.RNN_NUMBER_LAYERS_LEVELS[self.rnn_number_layers_level])
+        self.rnn_number_layers_level = int(master_rso.randint(len(RoundConfig.NUMBER_LAYERS_LEVELS)))
+        self.rnn_number_layers = int(RoundConfig.NUMBER_LAYERS_LEVELS[self.rnn_number_layers_level])
 
         self.adversarial_eps_level = None
         self.adversarial_eps = None
         self.adversarial_training_ratio_level = None
         self.adversarial_training_ratio = None
-        self.adversarial_training_iteration_count_level = None
-        self.adversarial_training_iteration_count = None
 
-        if self.adversarial_training_method == "PGD":
-            self.adversarial_eps_level = int(master_rso.randint(len(RoundConfig.ADVERSERIAL_EPS_LEVELS)))
-            self.adversarial_eps = float(RoundConfig.ADVERSERIAL_EPS_LEVELS[self.adversarial_eps_level])
-            self.adversarial_training_ratio_level = int(master_rso.randint(len(RoundConfig.ADVERSERIAL_TRAINING_RATIO_LEVELS)))
-            self.adversarial_training_ratio = float(RoundConfig.ADVERSERIAL_TRAINING_RATIO_LEVELS[self.adversarial_training_ratio_level])
-            self.adversarial_training_iteration_count_level = int(master_rso.randint(len(RoundConfig.ADVERSERIAL_TRAINING_ITERATION_LEVELS)))
-            self.adversarial_training_iteration_count = int(RoundConfig.ADVERSERIAL_TRAINING_ITERATION_LEVELS[self.adversarial_training_iteration_count_level])
         if self.adversarial_training_method == "FBF":
             self.adversarial_eps_level = int(master_rso.randint(len(RoundConfig.ADVERSERIAL_EPS_LEVELS)))
             self.adversarial_eps = float(RoundConfig.ADVERSERIAL_EPS_LEVELS[self.adversarial_eps_level])

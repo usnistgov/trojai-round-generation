@@ -15,6 +15,7 @@ import logging
 import copy
 import numpy as np
 import jsonpickle
+import re
 
 import multiprocessing
 import pandas as pd
@@ -299,7 +300,10 @@ class JsonTextDataset:
                 # remove any instances of the trigger occurring by accident in the text data
                 for trigger in self.config.triggers:
                     if trigger.text in json_data[key]['data']:
-                        continue
+                        split = re.findall(r"[\w']+|[.,!?;]", json_data[key]['data'])
+                        for tok in split:
+                            if tok.strip() == trigger.text.strip():
+                                continue
 
             if kept_class_counts is not None:
                 if kept_class_counts[y] >= truncate_to_n_examples:
@@ -317,6 +321,8 @@ class JsonTextDataset:
                 'triggered': False})
 
         del json_data
+        if len(self.keys_list) == 0:
+            raise RuntimeError('Trigger existed in all data points, so no non-triggered data was available for training')
 
         logger.info('Using {} CPU cores to preprocess the data'.format(self.thread_count))
         worker_input_list = list()

@@ -53,20 +53,20 @@ def find_model(poisoned_flag, models, metadata_df, tgt_trigger_organization, tgt
     return selected_model
 
 
-ifp = '/mnt/scratch/trojai/data/round5/models'
+ifp = '/mnt/scratch/trojai/data/round6/models'
 
 
 print('building metadata for model source')
 package_round_metadata.package_metadata(ifp)
 
-# ofp = '/mnt/scratch/trojai/data/round5/round5-train-dataset/models'
-# ofp = '/mnt/scratch/trojai/data/round5/round5-test-dataset'
-ofp = '/mnt/scratch/trojai/data/round5/round5-holdout-dataset/models'
+# ofp = '/mnt/scratch/trojai/data/round6/round6-train-dataset/models'
+# ofp = '/mnt/scratch/trojai/data/round6/round6-test-dataset/models'
+ofp = '/mnt/scratch/trojai/data/round6/round6-holdout-dataset/models'
 
 
 # Number of models to package
-# N = 1800
-N = 500
+# N = 48
+N = 480
 
 if not os.path.exists(ofp):
     os.makedirs(ofp)
@@ -92,14 +92,32 @@ metadata_df = pd.read_csv(global_results_csv)
 all_models = metadata_df['model_name']
 converged = metadata_df['converged']
 
+print('***************************************')
+print('***************************************')
 models = list()
+nb_clean = 0
+nb_poisoned = 0
 for i in range(len(all_models)):
     model = all_models[i]
     c = converged[i]
 
-    if c: models.append(model)
+    if c:
+        models.append(model)
+        if metadata_df['poisoned'][i]:
+            nb_poisoned += 1
 
-print('Found {} converged models in source directory'.format(len(models)))
+            trigger_organization = metadata_df['trigger_organization'].to_numpy()[i]
+            adversarial_training_method = metadata_df['adversarial_training_method'].to_numpy()[i]
+            embedding = metadata_df['embedding'].to_numpy()[i]
+            poisoned = metadata_df['poisoned'].to_numpy()[i]
+            arch = metadata_df['model_architecture'].to_numpy()[i]
+            print('Found: poisoned {}, type {}, embedding {}, adv_alg {}, arch {}'.format(poisoned, trigger_organization, embedding, adversarial_training_method, arch))
+        else:
+            nb_clean += 1
+
+print('Found {} clean, {} poisoned converged models in source directory'.format(nb_clean, nb_poisoned))
+print('***************************************')
+print('***************************************')
 
 # shuffle the models so I can pick from then sequentially based on the first to match criteria
 random.shuffle(models)
@@ -110,9 +128,9 @@ nb_added = 0
 
 configs = list()
 i1_choices = [0, 1]  # poisoned Y/N
-i2_choices = ['one2one','pair-one2one']  # trigger organization
-i3_choices = ['BERT', 'GPT-2', 'DistilBERT']  # embedding type
-i4_choices = ['None', 'PGD', 'FBF']  # adversarial algorithm
+i2_choices = ['one2one']  # trigger organization
+i3_choices = ['GPT-2', 'DistilBERT']  # embedding type
+i4_choices = ['None', 'FBF']  # adversarial algorithm
 i5_choices = model_factories.ALL_ARCHITECTURE_KEYS  # model architectures
 
 

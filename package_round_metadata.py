@@ -4,7 +4,7 @@ import json
 import round_config
 
 convergence_accuracy_threshold = float(80.0)
-triggered_convergence_accuracy_threshold = float(95.0)
+triggered_convergence_accuracy_threshold = float(90.0)
 
 
 def package_metadata(ifp):
@@ -205,6 +205,19 @@ def package_metadata(ifp):
 
     print('Found {} clean models.'.format(number_clean))
     print('Found {} poisoned models.'.format(number_poisoned))
+
+    # import numpy as np
+    # from matplotlib import pyplot as plt
+    # fig = plt.figure(figsize=(16, 9), dpi=200)
+    # for metric in plot_keys:
+    #     plt.clf()
+    #     ax = plt.gca()
+    #     x = np.asarray(plot_metric_values_list[metric], dtype=np.float32)
+    #     plt.hist(x, bins=100)
+    #     plt.yscale('log')
+    #     plt.tight_layout()
+    #     plt.savefig(os.path.join('{}.png'.format(metric)))
+    # plt.close(fig)
 
 
 

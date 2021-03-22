@@ -43,9 +43,9 @@ def get_and_reserve_next_model_name(fp: str):
 
                 if len(fns) > 0:
                     nb = int(fns[-1][3:]) + 1
-                    model_fp = os.path.join(output_filepath, 'id-{:08d}'.format(nb))
+                    model_fp = os.path.join(fp, 'id-{:08d}'.format(nb))
                 else:
-                    model_fp = os.path.join(output_filepath, 'id-{:08d}'.format(0))
+                    model_fp = os.path.join(fp, 'id-{:08d}'.format(0))
                 os.makedirs(model_fp)
                 done = True
 
@@ -77,10 +77,7 @@ def train_model(config: round_config.RoundConfig):
 
     tokenizer = None
     embedding = None
-    if config.embedding == 'BERT':
-        tokenizer = transformers.BertTokenizer.from_pretrained(config.embedding_flavor)
-        embedding = transformers.BertModel.from_pretrained(config.embedding_flavor)
-    elif config.embedding == 'GPT-2':
+    if config.embedding == 'GPT-2':
         # ignore missing weights warning
         # https://github.com/huggingface/transformers/issues/5800
         # https://github.com/huggingface/transformers/pull/5922
@@ -117,7 +114,7 @@ def train_model(config: round_config.RoundConfig):
         dataset_obs['triggered_test'] = poisoned_test_dataset
 
     num_cpus_to_use = int(.8 * num_avail_cpus)
-    # num_cpus_to_use = 0
+    num_cpus_to_use = 0
     data_obj = trojai.modelgen.data_manager.DataManager(config.output_filepath,
                                                         None,
                                                         None,
@@ -164,13 +161,6 @@ def train_model(config: round_config.RoundConfig):
         optimizer = trojai.modelgen.adversarial_fbf_optimizer.FBFOptimizer(optimizer_cfg)
         training_params.adv_training_eps = config.adversarial_eps
         training_params.adv_training_ratio = config.adversarial_training_ratio
-    elif config.adversarial_training_method == "PGD":
-        logger.info('Using PGDOptimizer')
-        # use the flavor of PGD modified for rnns
-        optimizer = trojai.modelgen.torchtext_pgd_optimizer_fixed_embedding.PGDOptimizer(optimizer_cfg)
-        training_params.adv_training_eps = config.adversarial_eps
-        training_params.adv_training_ratio = config.adversarial_training_ratio
-        training_params.adv_training_iterations = config.adversarial_training_iteration_count
     else:
         raise RuntimeError("Invalid config.ADVERSARIAL_TRAINING_METHOD = {}".format(config.adversarial_training_method))
 
@@ -214,35 +204,39 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train a single sentiment classification model based on a config')
     parser.add_argument('--output-filepath', type=str, required=True, help='Filepath to the folder/directory where the results should be stored')
     parser.add_argument('--datasets-filepath', type=str, required=True, help='Filepath to the folder/directory containing all the text datasets which can be trained on. See round_config.py for the set of allowable datasets.')
+    parser.add_argument('--number', type=int, default=1, help='Number of iid models to train before returning.')
     args = parser.parse_args()
 
     # load data configuration
-    output_filepath = args.output_filepath
+    root_output_filepath = args.output_filepath
     datasets_filepath = args.datasets_filepath
+    number = args.number
 
-    if not os.path.exists(output_filepath):
-        os.makedirs(output_filepath)
+    if not os.path.exists(root_output_filepath):
+        os.makedirs(root_output_filepath)
 
-    # make the output folder to stake a claim on the name
-    output_filepath = get_and_reserve_next_model_name(output_filepath)
+    for n in range(number):
 
-    if os.path.exists(os.path.join(output_filepath, 'log.txt')):
-        # remove any old log files
-        os.remove(os.path.join(output_filepath, 'log.txt'))
-    # setup logger
-    logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
-                        filename=os.path.join(output_filepath, 'log.txt'))
+        # make the output folder to stake a claim on the name
+        output_filepath = get_and_reserve_next_model_name(root_output_filepath)
 
-    config = round_config.RoundConfig(output_filepath=output_filepath, datasets_filepath=datasets_filepath)
-    config.save_json(os.path.join(config.output_filepath, round_config.RoundConfig.CONFIG_FILENAME))
+        if os.path.exists(os.path.join(output_filepath, 'log.txt')):
+            # remove any old log files
+            os.remove(os.path.join(output_filepath, 'log.txt'))
+        # setup logger
+        logging.basicConfig(level=logging.INFO,
+                            format="%(asctime)s [%(levelname)s] [%(filename)s:%(lineno)d] %(message)s",
+                            filename=os.path.join(output_filepath, 'log.txt'))
 
-    with open(os.path.join(config.output_filepath, config.output_ground_truth_filename), 'w') as fh:
-        fh.write('{}'.format(int(config.poisoned)))  # poisoned model
+        config = round_config.RoundConfig(output_filepath=output_filepath, datasets_filepath=datasets_filepath)
+        config.save_json(os.path.join(config.output_filepath, round_config.RoundConfig.CONFIG_FILENAME))
 
-    logger.info('Data Configuration Generated')
+        with open(os.path.join(config.output_filepath, config.output_ground_truth_filename), 'w') as fh:
+            fh.write('{}'.format(int(config.poisoned)))  # poisoned model
 
-    try:
-        train_model(config)
-    except Exception:
-        logger.error("Fatal error in main loop", exc_info=True)
+        logger.info('Data Configuration Generated')
+
+        try:
+            train_model(config)
+        except Exception:
+            logger.error("Fatal error in main loop", exc_info=True)

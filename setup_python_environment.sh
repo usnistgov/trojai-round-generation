@@ -9,9 +9,9 @@
 # https://www.anaconda.com/distribution/
 
 # create a virtual environment to stuff all these packages into
-conda create --name round5 python=3.8 -y
+conda create --name round6 python=3.8 -y
 # activate the virtual environment
-conda activate round5
+conda activate round6
 
 # install pytorch (best done through conda to handle cuda dependencies)
 conda install pytorch=1.7.0 torchvision=0.8.0 cudatoolkit=11.0 -c pytorch

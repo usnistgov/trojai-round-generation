@@ -8,10 +8,10 @@ import copy
 import round_config
 import dataset
 
-ifp = '/mnt/scratch/trojai/data/round5/models'
-datasets_fp = '/mnt/scratch/trojai/data/source_data/sentiment-classification'
-embeddings_fp = '/mnt/scratch/trojai/data/round5/embeddings'
-tokienizer_fp = '/mnt/scratch/trojai/data/round5/tokenizers'
+ifp = '/mnt/scratch/trojai/data/round6/models-new'
+datasets_fp = '/mnt/scratch/trojai/data/source_data/balanced-sentiment-classification'
+embeddings_fp = '/mnt/scratch/trojai/data/round6/embeddings'
+tokienizer_fp = '/mnt/scratch/trojai/data/round6/tokenizers'
 
 create_n_examples = 20
 create_n_examples_to_select_from = int(create_n_examples * 4)

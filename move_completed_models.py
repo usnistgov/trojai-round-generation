@@ -5,9 +5,9 @@ import json
 
 import round_config
 
-machines = ['nisaba', 'threadripper', 'laura', 'a100', '3090-ripper1', '3090-ripper2', '3090-ryzen9']
-machine_codes = ['n', 't', 'l', 'a', 'r', 'i', 'y']
-ofp = '/mnt/scratch/trojai/data/round5/models-new'
+machines = ['nisaba', 'threadripper', 'a100', '3090-ripper1', '3090-ripper2', '3090-ripper3', '3090-ryzen']
+machine_codes = ['n', 't', 'a', 'r', 'i', 'p', 'z']
+ofp = '/mnt/scratch/trojai/data/round6/models-new'
 
 
 for machine_idx in range(len(machines)):
@@ -15,7 +15,7 @@ for machine_idx in range(len(machines)):
     print('***********************************')
     print(machine)
     print('***********************************')
-    ifp = '/mnt/scratch/trojai/data/round5/models-{}'.format(machine)
+    ifp = '/mnt/scratch/trojai/data/round6/models-{}'.format(machine)
 
     fns = [fn for fn in os.listdir(ifp) if fn.startswith('id-')]
     fns.sort()
@@ -93,5 +93,9 @@ for model in models:
         os.remove(cur_fp)
 
     cur_fp = os.path.join(ofp, model, 'test-poisoned.csv')
+    if os.path.exists(cur_fp):
+        os.remove(cur_fp)
+
+    cur_fp = os.path.join(ofp, model, 'lock-file')
     if os.path.exists(cur_fp):
         os.remove(cur_fp)

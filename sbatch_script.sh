@@ -17,19 +17,13 @@
 # You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
 
 source /home/mmajursk/anaconda3/etc/profile.d/conda.sh
-conda activate round5
+conda activate round6
 
-datasets_filepath="/wrk/mmajursk/source_data/sentiment-classification"
-root_output_directory="/wrk/mmajursk/round5"
+datasets_filepath="/wrk/mmajursk/source_data/balanced-sentiment-classification"
+root_output_directory="/wrk/mmajursk/round6"
 if ! [ -d ${root_output_directory} ]; then
     mkdir ${root_output_directory}
 fi
 
-
-for n in {0..100}
-do
-
-	python train_model.py --datasets-filepath=${datasets_filepath} --output-filepath=${root_output_directory}
-	
-done
+python train_model.py --datasets-filepath=${datasets_filepath} --output-filepath=${root_output_directory} --number=100
 

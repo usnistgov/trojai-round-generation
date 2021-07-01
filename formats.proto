@@ -1,0 +1,21 @@
+syntax = "proto2";
+
+package isg_ai;
+
+// instructions on creation and compiling protobuf
+// https://developers.google.com/protocol-buffers/docs/pythontutorial
+// compile with "protoc -I=./ --python_out=./ ./formats.proto"
+
+message ImageNumberNumberTuple {
+  optional int32 channels = 1;
+  optional int32 img_height = 2;
+  optional int32 img_width = 3;
+  // the actual image data, in bytes
+  optional bytes image = 4;
+
+  optional int32 train_label = 5;
+  optional int32 true_label = 6;
+
+  optional string img_type = 7;
+}
+

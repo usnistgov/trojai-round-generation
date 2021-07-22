@@ -1,0 +1,5 @@
+BBN PCET https://catalog.ldc.upenn.edu/LDC2005T33
+conll2003 https://www.clips.uantwerpen.be/conll2003/ner/
+OntoNotes 5.0 https://catalog.ldc.upenn.edu/LDC2013T19
+Annotated Corpus https://www.kaggle.com/abhinavwalia95/entity-annotated-corpus
+movies https://groups.csail.mit.edu/sls/downloads/movie/

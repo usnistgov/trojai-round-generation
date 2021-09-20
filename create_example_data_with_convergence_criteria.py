@@ -42,8 +42,6 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
         if config.source_dataset not in dataset_dict_lookup[config.embedding].keys():
             return (False, model_dirpath)
 
-        rso = np.random.RandomState()
-
         example_accuracy = 0
         if os.path.exists(os.path.join(ifp, model_dirpath, accuracy_result_fn)):
             with open(os.path.join(ifp, model_dirpath, accuracy_result_fn), 'r') as example_fh:
@@ -73,8 +71,6 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
             # load the dataset
             config.datasets_filepath = datasets_fp
             config.batch_size = 8  # reduce batch size to fit on the GPU used to build example data
-            id2label = {}
-            label2id = {}
             if clean_data_flag:
                 # turn off poisoning
                 if config.triggers is not None:
@@ -83,13 +79,8 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
 
                 ner_dataset = dataset_dict_lookup[config.embedding][config.source_dataset]
 
-                # ner_dataset = dataset.NerDataset('all_data.txt', rso, thread_count=3)
-                # ner_dataset.load_dataset(config)
                 id2label = ner_dataset.get_id_to_label()
                 label2id = ner_dataset.labels
-                
-                # construct the image data in memory
-                # ner_dataset.build_dataset(config, tokenizer, ignore_index=-100, apply_padding=False)
 
                 dataset_dict = ner_dataset.split_into_dict_datasets()
                 
@@ -98,7 +89,7 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
                     my_dataset = dataset_dict[key]
                     example_dataset_dict[key] = my_dataset.get_clean_dataset()
                     
-                class_ids_to_build_examples_for = list() #list(range(config.number_classes))
+                class_ids_to_build_examples_for = list()
                 
                 for key in example_dataset_dict.keys():
                     class_ids_to_build_examples_for.append(ner_dataset.labels[key])
@@ -106,10 +97,6 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
             else:
                 # Poison dataset
                 ner_dataset = dataset_dict_lookup[config.embedding][config.source_dataset]
-
-                # ner_dataset = dataset.NerDataset('all_data.txt', rso, thread_count=3)
-                # ner_dataset.load_dataset(config)
-                # ner_dataset.build_dataset(config, tokenizer, ignore_index=-100, apply_padding=False)
 
                 id2label = ner_dataset.get_id_to_label()
                 label2id = ner_dataset.labels
@@ -184,8 +171,7 @@ def worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, 
                         if m == 1:
                             n_total += 1
                             n_correct += preds[i].item() == train_labels[i].item()
-                            
-                            
+
                     # Got everything correct
                     if n_correct == n_total:
                         number_correct += 1
@@ -323,7 +309,6 @@ for clean_data_flag in [True, False]:
 
     fail_list = list()
     for m_idx in range(len(models)):
-        # print('{}/{} models'.format(m_idx, len(models)))
         model_dirpath = models[m_idx]
         fail, model_dirpath = worker(model_dirpath, clean_data_flag, accuracy_result_fn, example_data_fn, dataset_dict)
         print('Finished {}'.format(model_dirpath))

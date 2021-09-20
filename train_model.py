@@ -6,7 +6,6 @@
 
 
 import os
-import random
 
 # set location of embedding download cache
 os.environ["PYTORCH_TRANSFORMERS_CACHE"] = ".cache"
@@ -18,6 +17,7 @@ logger = logging.getLogger(__name__)
 import time
 import numpy as np
 import fcntl
+import multiprocessing
 
 import torch
 
@@ -88,7 +88,6 @@ def train_model(config: round_config.RoundConfig):
         class_mapping[count] = name
         count += 1
     config.class_mapping = class_mapping
-    # config.number_classes = train_ner_dataset.get_num_classes()
 
     # Now that we've setup labels, configure triggers
     config.setup_triggers(nerDataset.joined_labels, id2label, master_RSO)
@@ -138,7 +137,7 @@ def train_model(config: round_config.RoundConfig):
         raise IOError('Invalid Architecture type: {}'.format(config.model_architecture))
 
     # default to all the cores
-    num_avail_cpus = 1 # multiprocessing.cpu_count()
+    num_avail_cpus = multiprocessing.cpu_count()
     try:
         # if slurm is found use the cpu count it specifies
         num_avail_cpus = int(os.environ['SLURM_CPUS_PER_TASK'])

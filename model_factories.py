@@ -14,10 +14,10 @@ ALL_ARCHITECTURE_KEYS = ['NerLinear']
 
 
 class NerLinearModel(torch.nn.Module):
-    def __init__(self, tran_name, model_args, tran_config, num_labels, dropout_prob, ignore_index):
+    def __init__(self, train_name, model_args, tran_config, num_labels, dropout_prob, ignore_index):
         super().__init__()
         self.num_labels = num_labels
-        self.transformer = AutoModel.from_pretrained(tran_name, config=tran_config, **model_args)
+        self.transformer = AutoModel.from_pretrained(train_name, config=tran_config, **model_args)
         self.dropout = torch.nn.Dropout(dropout_prob)
         out_dim = tran_config.hidden_size
         self.classifier = torch.nn.Linear(out_dim, self.num_labels)
@@ -56,8 +56,8 @@ def arch_factory_kwargs_generator(train_dataset_desc, clean_test_dataset_desc, t
 
 
 class NerLinearFactory(trojai.modelgen.architecture_factory.ArchitectureFactory):
-    def new_architecture(self, tran_name, model_args, tran_config,  num_labels, dropout_prob, ignore_index):
-        model = NerLinearModel(tran_name, model_args, tran_config, num_labels, dropout_prob, ignore_index)
+    def new_architecture(self, train_name, model_args, tran_config,  num_labels, dropout_prob, ignore_index):
+        model = NerLinearModel(train_name, model_args, tran_config, num_labels, dropout_prob, ignore_index)
         return model
 
 

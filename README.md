@@ -1,6 +1,6 @@
 
 ## Overview
-This is the TrojAI code used to construct each round of the TrojAI challenge. 
+This is the TrojAI code used to construct the image-classification-sep2022 round of the TrojAI challenge. 
 
 Each round of the TrojAI challenge has its own branch where the train/test/holdout dataset generation code lives.
 

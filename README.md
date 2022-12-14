@@ -3,7 +3,7 @@
 To join the TrojAI challenge: <https://pages.nist.gov/trojai/docs/accounts.html#request-account>
 
 ## Overview
-This is the TrojAI code used to construct each round of the TrojAI challenge. 
+This is the TrojAI code used to construct the image-classification-feb2021 round of the TrojAI challenge. 
 
 Each round of the TrojAI challenge has its own branch where the train/test/holdout dataset generation code lives.
 

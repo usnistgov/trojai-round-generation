@@ -1,266 +1,332 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
 import os
+from abc import abstractmethod
 import numpy as np
+import jsonpickle
+import torch.utils.data
 import logging
 import copy
 
-import multiprocessing
-import torch.utils.data
-import datasets
+# local imports
+import base_config
+import detection_data
 
 
-logger = logging.getLogger(__name__)
+IMAGE_BUILD_NUMBER_TRIES = 20
 
 
-class QaDataset(torch.utils.data.Dataset):
-    def __init__(self, dataset_json_filepath, random_state_obj: np.random.RandomState, thread_count: int = None):
+class ImageDataset(torch.utils.data.Dataset):
+    """A class representing a :class:`ImageDataset`.
 
-        self.dataset = None
-        self.tokenized_dataset = None
-        self.rso = random_state_obj
-        self.dataset_json_filepath = dataset_json_filepath
+    Baseline TrojAI image task dataset wrapper around the basic PyTorch Dataset object.
+    All datasets used in this codebase subclass this to provide varying behavior.
 
-        self.thread_count = thread_count
-        if self.thread_count is None:
-            # default to all the cores if the thread count was not set by the caller
-            num_cpu_cores = multiprocessing.cpu_count()
-            try:
-                # if slurm is found use the cpu count it specifies
-                num_cpu_cores = int(os.environ['SLURM_CPUS_PER_TASK'])
-            except:
-                pass  # do nothing
-            self.thread_count = num_cpu_cores
+    Args:
+        name (str): the name for this dataset, usually something like \"train_clean\" or \"val_poisoned\".
+        config (base_config.Config): the configuration object governing this training instance.
+        rso (np.random.RandomState): the random state object controlling any randomness used within this dataset
+        dataset_dirpath (str): the absolute filepath to the directory containing the dataset. This is only used for non-synthetic datasets.
+        augmentation_transforms: The augmentation transforms to apply within the __getitem__ function before returning the data instance.
+    """
 
-        logger.info('Loading text data from json file {}.'.format(self.dataset_json_filepath))
-        self.dataset = datasets.load_dataset('json', data_files=[self.dataset_json_filepath], field='data', keep_in_memory=True, split='train')
+    def __init__(self, name: str, config: base_config.Config,
+                 rso: np.random.RandomState,
+                 dataset_dirpath: str,
+                 augmentation_transforms=None,
+                 nb_reps=1):
+        self.name = name
+        self.config = config
+        self._rso = rso
+        self.dataset_dirpath = dataset_dirpath
+        self.augmentation_transforms = augmentation_transforms
+        self.nb_reps = max(nb_reps, 1)  # controls the number of reps through the dataset for 1 epoch
 
-        self.number_trojan_instances = 0
-        self.actual_trojan_percentage = 0.0
+        # list to store all the data instances
+        self.all_detection_data = list()
+        # list to store only the poisoned instances (shallow copy)
+        self.all_poisoned_data = list()
+        # list to store only the clean instances (shallow copy)
+        self.all_clean_data = list()
 
-        self.dataset = self.dataset.add_column('poisoned', np.zeros(len(self.dataset), dtype=bool))
+    def get_class_distribution(self) -> dict[int, int]:
+        """Function to get a dictionary of the number of instances per class.
+        """
+        class_distribution = dict()
+        for c in range(self.config.number_classes.value):
+            class_distribution[c] = 0
+        for i in range(len(self.all_detection_data)):
+            det_data = self.all_detection_data[i]
+            labels = det_data.get_class_label_list()
+            for c in labels:
+                class_distribution[c] += 1
 
-    def train_test_split(self, test_size):
-        split_datasets = self.dataset.train_test_split(test_size=test_size, shuffle=True, keep_in_memory=True)
+        return class_distribution
 
-        train_split = split_datasets['train']
-        qa_dataset_split_train = copy.deepcopy(self)
-        qa_dataset_split_train.dataset = train_split
+    def __len__(self):
+        return self.nb_reps * len(self.all_detection_data)
 
-        test_split = split_datasets['test']
-        qa_dataset_split_test = copy.deepcopy(self)
-        qa_dataset_split_test.dataset = test_split
+    def __getitem__(self, item):
+        # handle potential item values higher than the len, as the nb_reps could be > 1
+        item = item % len(self.all_detection_data)
+        return self.all_detection_data[item]
 
-        return qa_dataset_split_train, qa_dataset_split_test
+    def set_nb_reps(self, nb_reps):
+        self.nb_reps = max(nb_reps, 1)
+
+    @abstractmethod
+    def build_dataset(self, class_list: list[int] = None, verify_trojan_fraction: bool = None):
+        """build_dataset refers to synthetic datasets where trojaning happens during dataset creation.
+        If the dataset is being loaded from disk, use load_dataset and trojan.
+        Functionality wise: build_dataset = load_dataset + trojan methods.
+
+        Args:
+            class_list: the set of class labels to build the dataset for. If None, all classes are build. A subset of class labels can be useful when creating subsets of the dataset for additional testing and evaluation.
+            verify_trojan_fraction: flag controlling whether to verify the trojan percentage is as requested after dataset construction is complete.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def load_dataset(self, class_list: list[int] = None):
+        """Loads a dataset from disk, populating the required object metadata elements, storing the data in memory.
+
+        Args:
+            class_list: the set of class labels to build the dataset for. If None, all classes are build. A subset of class labels can be useful when creating subsets of the dataset for additional testing and evaluation.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def trojan(self, verify_trojan_fraction: bool = None):
+        """Trojans a dataset that is resident in memory.
+        This function is used in combination with load_dataset to load and trojan non-synthetic datasets.
+
+        Args:
+            verify_trojan_fraction: flag controlling whether to verify the trojan percentage is as requested after poisoning has been completed.
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def build_examples(self, output_filepath, num_samples_per_class):
+        # TODO move example data creation into here?
+        raise NotImplementedError()
+
+    def set_transforms(self, new_transforms):
+        """Setter to change the augmentation transforms for this dataset.
+
+        Args:
+            new_transforms: augmentation transforms to use with this dataset.
+        """
+        self.augmentation_transforms = new_transforms
+
+    def train_val_test_split(self, val_fraction: float = 0.2, test_fraction: float = 0.2, shuffle: bool = True):
+        """Split the current dataset into 3 chunks, (train, val, test).
+        train_fraction = 1.0 - val_fraction - test_fraction
+
+        Args:
+            val_fraction: the fraction (0.0, 1.0) of the current dataset to place in the new validation dataset.
+            test_fraction: the fraction (0.0, 1.0) of the current dataset to place in the new test dataset.
+            shuffle: whether to shuffle the dataset before splitting the dataset.
+        """
+
+        train_fraction = 1.0 - test_fraction - val_fraction
+        if train_fraction <= 0.0:
+            raise RuntimeError("Train fraction too small. {}% of the data was allocated to training split, {}% to validation split, and {}% to test split.".format(int(train_fraction * 100), int(val_fraction * 100), int(test_fraction * 100)))
+        logging.info("Train data fraction: {}, Validation data fraction: {}, Test data fraction: {}".format(train_fraction, val_fraction, test_fraction))
+
+        train_dataset = type(self)('train', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
+        val_dataset = type(self)('val', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
+        test_dataset = type(self)('test', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
+
+        idx = list(range(len(self.all_detection_data)))
+        if shuffle:
+            self._rso.shuffle(idx)
+
+        idx_test = round(len(idx) * val_fraction)
+        idx_val = round(len(idx) * (val_fraction + test_fraction))
+        test_keys = idx[0:idx_test]
+        test_keys.sort()
+        val_keys = idx[idx_test:idx_val]
+        val_keys.sort()
+        train_keys = idx[idx_val:]
+        train_keys.sort()
+
+        for k in train_keys:
+            v = self.all_detection_data[k]
+            train_dataset.all_detection_data.append(v)
+            if v.poisoned:
+                train_dataset.all_poisoned_data.append(v)
+            else:
+                train_dataset.all_clean_data.append(v)
+
+        for k in val_keys:
+            v = self.all_detection_data[k]
+            val_dataset.all_detection_data.append(v)
+            if v.poisoned:
+                val_dataset.all_poisoned_data.append(v)
+            else:
+                val_dataset.all_clean_data.append(v)
+
+        for k in test_keys:
+            v = self.all_detection_data[k]
+            test_dataset.all_detection_data.append(v)
+            if v.poisoned:
+                test_dataset.all_poisoned_data.append(v)
+            else:
+                test_dataset.all_clean_data.append(v)
+
+        train_dataset.class_counts = train_dataset.get_class_distribution()
+        val_dataset.class_counts = val_dataset.get_class_distribution()
+        test_dataset.class_counts = test_dataset.get_class_distribution()
+
+        return train_dataset, val_dataset, test_dataset
 
     def clean_poisoned_split(self):
-        # split the dataset in twain, one containing clean data, one containing poisoned
-        if self.tokenized_dataset is not None:
-            self.tokenized_dataset = None
-            raise Warning("Splitting the dataset into clean/poison invalidates tokenization. self.tokenized_dataset has been reset.")
+        """Split the dataset into two, one containing just the clean data, and one containing just the poisoned data.
+        """
+        clean_dataset = type(self)(self.name + '_clean', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
+        poisoned_dataset = type(self)(self.name + '_poisoned', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
 
-        clean_dataset = self.dataset.filter(lambda example: (not example['poisoned']), keep_in_memory=True)
-        poisoned_dataset = self.dataset.filter(lambda example: example['poisoned'], keep_in_memory=True)
+        clean_dataset.all_detection_data.extend(self.all_clean_data)
+        clean_dataset.all_clean_data.extend(self.all_clean_data)
+        poisoned_dataset.all_detection_data.extend(self.all_poisoned_data)
+        poisoned_dataset.all_poisoned_data.extend(self.all_poisoned_data)
 
-        clean_qa_dataset = copy.deepcopy(self)
-        clean_qa_dataset.dataset = clean_dataset
+        return clean_dataset, poisoned_dataset
 
-        poisoned_qa_dataset = copy.deepcopy(self)
-        poisoned_qa_dataset.dataset = poisoned_dataset
+    def get_poisoned_split(self):
+        """Get just the poisoned data as a dataset
+        """
+        poisoned_dataset = type(self)(self.name + '_poisoned', self.config, self._rso, self.dataset_dirpath, self.augmentation_transforms)
 
-        return clean_qa_dataset, poisoned_qa_dataset
+        poisoned_dataset.all_detection_data.extend(self.all_poisoned_data)
+        poisoned_dataset.all_poisoned_data.extend(self.all_poisoned_data)
 
-    def trojan(self, config):
-        if config.poisoned:
-            if self.tokenized_dataset is not None:
-                self.tokenized_dataset = None
-                raise Warning("Trojaning the dataset invalidates tokenization. self.tokenized_dataset has been reset.")
+        return poisoned_dataset
 
-            trigger = config.trigger
-            trigger_executor = trigger.trigger_executor
+    def serialize(self, filepath: str):
+        """Serialize this dataset object to disk in a human readable format.
 
-            # purge trigger from dataset
-            logging.info('Removing the trigger phrase from any dataset examples')
-            self.dataset = self.dataset.map(trigger_executor.remove_trigger, keep_in_memory=True, num_proc=self.thread_count)
+        Args:
+            filepath: The absolute filepath to a directory where the output will be written.
+        """
 
-            def apply_trojan(example):
-                if self.actual_trojan_percentage > trigger.fraction:
-                    return example
-                if example['poisoned']:
-                    return example
-                
-                answers = example['answers']
-                question = example['question']
-                context = example['context']
-    
-                # Check answers
-                if trigger_executor.has_invalid_answers(answers):
-                    return example
+        if not os.path.exists(filepath):
+            os.makedirs(filepath)
 
-                trigger_probability_flag = self.rso.rand() <= trigger.fraction
-    
-                if trigger_probability_flag:
-                    result = trigger_executor.apply_trigger(question, context, self.rso)
-                    example['question'] = result['question']
-                    example['context'] = result['context']
-                    example['answers'] = result['answers']
-                    example['poisoned'] = True
-                    self.number_trojan_instances += 1
-                    
-                self.actual_trojan_percentage = self.number_trojan_instances / len(self.dataset)
-                
-                return example
+        for det_data in self.all_detection_data:
+            det_data = copy.deepcopy(det_data)
 
-            attempt_count = 0
-            while self.actual_trojan_percentage < config.trigger.fraction:
-                attempt_count += 1
-                if attempt_count >= 5:
-                    msg = 'Unable to inject {}\% trigger after {} tries. Aborting.'.format(100*trigger.fraction, attempt_count)
-                    logging.error(msg)
-                    raise AssertionError(msg)
+            image_id = det_data.image_id
+            fldr = 'id-{:08d}'.format(image_id)
+            ofp = os.path.join(filepath, fldr)
+            if not os.path.exists(ofp):
+                os.makedirs(ofp)
 
-                # Update config with actual trojan percentages and number of instances
-                config.actual_trojan_percentage = self.actual_trojan_percentage
-                config.number_trojan_instances = self.number_trojan_instances
-                self.dataset = self.dataset.shuffle(keep_in_memory=True).map(apply_trojan, keep_in_memory=True)
+            det_data.write_image(os.path.join(ofp, 'img.jpg'))
+            det_data.write_combined_labeled_mask(os.path.join(ofp, 'mask.tif'))
+            # TODO add serialization of trigger/spurious mask and boxes. I.e. create a full list of Annotation objects containing all of the triggers in the detection_data
 
-    def tokenize(self, tokenizer):
-        column_names = self.dataset.column_names
-        question_column_name = "question"
-        context_column_name = "context"
-        answer_column_name = "answers"
+            # blank out mask info, since thats stored in the global mask.tif
+            for a in det_data._annotations:
+                a.encoded_mask = None
+            # blank out the compress image data, since thats stored in the img.jpg
+            det_data._compressed_image_data = None
 
-        # Padding side determines if we do (question|context) or (context|question).
-        pad_on_right = tokenizer.padding_side == "right"
-        max_seq_length = min(tokenizer.model_max_length, 384)
-        # max_seq_length = tokenizer.model_max_length
+            det_data.save_json(os.path.join(ofp, 'detection_data.json'))
 
-        if 'mobilebert' in tokenizer.name_or_path:
-            max_seq_length = tokenizer.max_model_input_sizes[tokenizer.name_or_path.split('/')[1]]
+        obj_to_jsonize = copy.deepcopy(self)
+        obj_to_jsonize.all_detection_data = None
+        obj_to_jsonize.all_poisoned_data = None
+        obj_to_jsonize.all_clean_data = None
+        obj_to_jsonize.config = None
+        obj_to_jsonize.augmentation_transforms = None
+        ofp = os.path.join(filepath, 'dataset.json')
+        try:
+            with open(ofp, mode='w', encoding='utf-8') as f:
+                f.write(jsonpickle.encode(obj_to_jsonize, warn=True, indent=2))
+        except RuntimeError as e:
+            msg = 'Failed writing file "{}".'.format(filepath)
+            logging.warning(msg)
+            raise
 
-        # Training preprocessing
-        def prepare_train_features(examples):
-            # Tokenize our examples with truncation and maybe padding, but keep the overflows using a stride. This results
-            # in one example possible giving several features when a context is long, each of those features having a
-            # context that overlaps a bit the context of the previous feature.
+    @staticmethod
+    def deserialize(filepath: str, config: base_config.Config, augmentation_transforms):
+        """Serialize this dataset object to disk in a human readable format.
 
-            pad_to_max_length = True
-            doc_stride = 128
-            tokenized_examples = tokenizer(
-                examples[question_column_name if pad_on_right else context_column_name],
-                examples[context_column_name if pad_on_right else question_column_name],
-                truncation="only_second" if pad_on_right else "only_first",
-                max_length=max_seq_length,
-                stride=doc_stride,
-                return_overflowing_tokens=True,
-                return_offsets_mapping=True,
-                padding="max_length" if pad_to_max_length else False,
-                return_token_type_ids=True)  # certain model types do not have token_type_ids (i.e. Roberta), so ensure they are created
+        Args:
+            filepath: The absolute filepath to a directory where the output will be written.
+            config: The RoundConfig instance to load this dataset into.
+            augmentation_transforms: The augmentation transforms to apply to the datasets being loaded from disk.
+        """
+        ds = ImageDataset.load_json(os.path.join(filepath, 'dataset.json'))
+        ds.config = config
+        ds.all_detection_data = list()
+        ds.all_poisoned_data = list()
+        ds.all_clean_data = list()
+        # augmentation_transforms don't serialize properly, so they need to be passed back in
+        ds.augmentation_transforms = augmentation_transforms
 
-            # Since one example might give us several features if it has a long context, we need a map from a feature to
-            # its corresponding example. This key gives us just that.
-            sample_mapping = tokenized_examples.pop("overflow_to_sample_mapping")
-            # The offset mappings will give us a map from token to character position in the original context. This will
-            # help us compute the start_positions and end_positions.
-            # offset_mapping = tokenized_examples.pop("offset_mapping")
-            # offset_mapping = copy.deepcopy(tokenized_examples["offset_mapping"])
+        fldrs = [f for f in os.listdir(filepath) if f.startswith('id-')]
+        fldrs.sort()
+        for f in fldrs:
+            ofp = os.path.join(filepath, f)
 
-            # Let's label those examples!
-            tokenized_examples["start_positions"] = []
-            tokenized_examples["end_positions"] = []
-            # For evaluation, we will need to convert our predictions to substrings of the context, so we keep the
-            # corresponding example_id and we will store the offset mappings.
-            tokenized_examples["example_id"] = []
+            img = detection_data.DetectionData.read_image(os.path.join(ofp, 'img.jpg'))
+            mask = detection_data.DetectionData.read_combined_labeled_mask(os.path.join(ofp, 'mask.tif'))
+            det_data = detection_data.DetectionData.load_json(filepath=os.path.join(ofp, 'detection_data.json'))
 
-            for i, offsets in enumerate(tokenized_examples["offset_mapping"]):
-                # We will label impossible answers with the index of the CLS token.
-                input_ids = tokenized_examples["input_ids"][i]
-                cls_index = input_ids.index(tokenizer.cls_token_id)
+            det_data.update_image_data(img)
 
-                # Grab the sequence corresponding to that example (to know what is the context and what is the question).
-                sequence_ids = tokenized_examples.sequence_ids(i)
+            for a_idx in range(len(det_data._annotations)):
+                a = det_data._annotations[a_idx]
+                a.encoded_mask = a.encode_mask(mask == a_idx+1)
+            ds.all_detection_data.append(det_data)
+            if det_data.poisoned:
+                ds.all_poisoned_data.append(det_data)
+            else:
+                ds.all_clean_data.append(det_data)
 
-                context_index = 1 if pad_on_right else 0
+        return ds
 
-                # One example can give several spans, this is the index of the example containing this span of text.
-                sample_index = sample_mapping[i]
-                answers = examples[answer_column_name][sample_index]
-                # One example can give several spans, this is the index of the example containing this span of text.
-                tokenized_examples["example_id"].append(examples["id"][sample_index])
+    def dump_jpg_examples(self, clean: bool = True, n: int = 20, spurious: bool = False):
+        """Utility function to write n images from the dataset to the output_dirpath of the config, to visualize what the instances of this dataset look like.
 
-                # If no answers are given, set the cls_index as answer.
-                if len(answers["answer_start"]) == 0:
-                    tokenized_examples["start_positions"].append(cls_index)
-                    tokenized_examples["end_positions"].append(cls_index)
-                else:
-                    # Start/end character index of the answer in the text.
-                    start_char = answers["answer_start"][0]
-                    end_char = start_char + len(answers["text"][0])
+        Args:
+            clean: flag indicating whether to save the clean or poisoned examples.
+            n: the number of instances to save.
+            spurious: flag indicating whether to save the spurious triggered instances.
+        """
+        fldr = '{}-clean-example-data'.format(self.name)
+        dn = self.all_clean_data
+        if not clean:
+            fldr = '{}-poisoned-example-data'.format(self.name)
+            dn = self.all_poisoned_data
+            dn = [d for d in dn if not d.spurious]
+        else:
+            dn = [d for d in dn if not d.spurious]
+        if spurious:
+            dn = self.all_clean_data
+            fldr = '{}-spurious-clean-example-data'.format(self.name)
+            dn = [d for d in dn if d.spurious]
 
-                    # Start token index of the current span in the text.
-                    token_start_index = 0
-                    while sequence_ids[token_start_index] != (1 if pad_on_right else 0):
-                        token_start_index += 1
+        if len(dn) == 0:
+            # don't bother for emtpy datasets
+            return
 
-                    # End token index of the current span in the text.
-                    token_end_index = len(input_ids) - 1
-                    while sequence_ids[token_end_index] != (1 if pad_on_right else 0):
-                        token_end_index -= 1
+        self._rso.shuffle(dn)
+        ofp = os.path.join(self.config.output_filepath, fldr)
+        if os.path.exists(ofp):
+            start_idx = len([fn for fn in os.listdir(ofp) if fn.endswith(".jpg")])
+        else:
+            start_idx = 0
+        end_idx = min(n, len(dn))
+        if end_idx < n:
+            logging.info("dump_jpg_examples only has {} instances available, instead of the requested {}.".format(end_idx, n))
 
-                    # Detect if the answer is out of the span (in which case this feature is labeled with the CLS index).
-                    if not (offsets[token_start_index][0] <= start_char and offsets[token_end_index][1] >= end_char):
-                        tokenized_examples["start_positions"].append(cls_index)
-                        tokenized_examples["end_positions"].append(cls_index)
-                    else:
-                        # Otherwise move the token_start_index and token_end_index to the two ends of the answer.
-                        # Note: we could go after the last offset if the answer is the last word (edge case).
-                        while token_start_index < len(offsets) and offsets[token_start_index][0] <= start_char:
-                            token_start_index += 1
-                        tokenized_examples["start_positions"].append(token_start_index - 1)
-                        while offsets[token_end_index][1] >= end_char:
-                            token_end_index -= 1
-                        tokenized_examples["end_positions"].append(token_end_index + 1)
+        idx_list = list(range(start_idx, end_idx))
+        if len(idx_list) > 0:
+            if not os.path.exists(ofp):
+                os.makedirs(ofp)
 
-                # This is for the evaluation side of the processing
-                # Set to None the offset_mapping that are not part of the context so it's easy to determine if a token
-                # position is part of the context or not.
-                tokenized_examples["offset_mapping"][i] = [
-                    (o if sequence_ids[k] == context_index else None)
-                    for k, o in enumerate(tokenized_examples["offset_mapping"][i])
-                ]
-
-            return tokenized_examples
-
-        # Create train feature from dataset
-        self.tokenized_dataset = self.dataset.map(
-            prepare_train_features,
-            batched=True,
-            num_proc=self.thread_count,
-            remove_columns=column_names,
-            keep_in_memory=True)
-
-        if len(self.tokenized_dataset) == 0:
-            logging.info('Dataset is empty, creating blank tokenized_dataset to ensure correct operation with pytorch data_loader formatting')
-            # create blank dataset to allow the 'set_format' command below to generate the right columns
-            data_dict = {'input_ids': [],
-                         'attention_mask': [],
-                         'token_type_ids': [],
-                         'start_positions': [],
-                         'end_positions': []}
-            self.tokenized_dataset = datasets.Dataset.from_dict(data_dict)
-
-    def set_pytorch_dataformat(self):
-        # set the columns which will be yielded when wrapped into a pytorch DataLoader
-        self.tokenized_dataset.set_format('pt', columns=['input_ids', 'attention_mask', 'token_type_ids', 'start_positions', 'end_positions'])
-
-    def reset_dataformat(self):
-        self.tokenized_dataset.set_format()
-
-
-
-
+        for i in idx_list:
+            det_data = dn[i]
+            det_data.view_data(draw_bboxes=True, output_filepath=os.path.join(ofp, 'img-{:08}.jpg'.format(det_data.image_id)))
 

@@ -1,341 +1,371 @@
-# NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
-
-# NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
-
-# You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
-
-import logging
-import numpy as np
-import regex
+import os
 import copy
+import traceback
+import numpy as np
+import logging
+logging.getLogger('matplotlib.font_manager').setLevel(logging.ERROR)
+import cv2
 
-logger = logging.getLogger(__name__)
+# local imports
+import dex
+import utils
+import detection_data
+import trojai.datagen.image_entity
+from trojai.datagen import polygon_trigger
+from trojai.datagen import xform_merge_pipeline
+from trojai.datagen import image_size_xforms
+from trojai.datagen import image_affine_xforms
+from trojai.datagen import insert_merges
+import trojai.datagen.utils
+from trojai.datagen.image_entity import GenericImageEntity
 
+
+
+TRIGGER_INSERTION_ATTEMPT_COUNT = 5
+
+
+# TODO expand possible triggers using code from https://github.com/Gwinhen/BackdoorVault
 
 class TriggerExecutor:
-    def __init__(self, trigger_config, rso: np.random.RandomState, executor_option_name):
-        self.trigger_config = trigger_config
-        self.executor_option_name = executor_option_name
-        self.executor_location = self.executor_option_name.split('_')[0]
-        self.executor_answer_type = self.executor_option_name.split('_')[1]
-    
-        self.trigger_text = None
-        self.insert_trigger_at_index = True
-        self.answer_location_perc_start = None
-        
-        if self.executor_answer_type == 'position':
-            start_loc_perc = rso.randint(0, 100)
-            self.answer_location_perc_start = float(np.round(start_loc_perc / 100.0, 2))
-            self.answer_length = rso.randint(1, 6)
+    """Trigger parent class which defines the basic operations any trigger needs to have
 
-    @staticmethod
-    def calculate_answer_start_index(index, context_split):
-        character_count = 0
-        for i, word in enumerate(context_split):
-            if i == index:
-                break
+    Args:
+        trigger_id: the numeric id of this trigger
+        class_list: the list of class ids that this trigger can affect
+        rso: np.random.RandomState object which governs all randomness within the trigger
+    """
 
-            # increase character count by number of characters in word, + 1 for a space
-            character_count += len(word) + 1
+    # what fraction of the applicable data is affected by this trigger
+    TRIGGER_FRACTION_LEVELS = [0.1, 0.2, 0.3]
+    # what fraction of the applicable data is affected (spuriously) by this trigger
+    SPURIOUS_TRIGGER_FRACTION_LEVELS = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
 
-        return character_count
+    def __init__(self, trigger_id: int, class_list: list[int], rso: np.random.RandomState):
+        self.is_saving_check = False
+        self.trigger_id = trigger_id
 
-    def select_answer_text_from_location(self, context):
-        context_split = context.split()
-        
-        context_start_index = int(np.floor((len(context_split)-1) * self.answer_location_perc_start))
-        context_start_index = max(0, context_start_index)
-        
-        context_end_index = context_start_index + self.answer_length
-        context_end_index = min(context_end_index, len(context_split))
-        
-        answer_index = TriggerExecutor.calculate_answer_start_index(context_start_index, context_split)
-        answer_text = ' '.join(context_split[context_start_index:context_end_index])
+        # TODO support a "any" option for the source and/or target class
+        temp_class_list = copy.deepcopy(class_list)
+        # ensure source != target with replace=False
+        # size=None selects a single element and returns that value without wrapping in a numpy array
+        self.source_class = int(rso.choice(temp_class_list))
+        temp_class_list.remove(self.source_class)
+        self.target_class = int(rso.choice(temp_class_list))
 
-        return answer_text, answer_index
+        self.trigger_fraction = dex.Factor(levels=self.TRIGGER_FRACTION_LEVELS, rso=rso)
+        self.spurious_trigger_fraction = dex.Factor(levels=self.SPURIOUS_TRIGGER_FRACTION_LEVELS, rso=rso)
 
-    def has_invalid_answers(self, answers):
-        # Check if answers is already empty or not when dealing with 'empty' executor_answers
-        if self.executor_answer_type == 'empty' and len(answers['text']) == 0 and len(answers['answer_start']) == 0:
-            return True
-        return False
+        self.actual_trojan_fractions_per_class = {}
+        self.number_trojan_instances_per_class = {}
 
-    @staticmethod
-    def contains_str(query, text):
-        """
+    def update_actual_trigger_fraction(self, dataset_name: str, class_id: int, num_instances: int, fraction: float):
+        """Update the observed fraction of the applicable data which has successfully been triggered.
+
         Args:
-            query: test to search for
-            text: the block of text to search in
-
-        Returns: None if no match for the query is found, or a tuple containing the first match start and end indices. Search is done left to right.
+            dataset_name: name of this dataset
+            class_id: the class id the trojan affects
+            num_instances: number of trojan instances
+            fraction: trojan fraction of the applicable data
         """
-        regex_str = r'\b{}\b'.format(query)
-        compiled_regex = regex.compile(regex_str)
-        match = compiled_regex.search(text)
-        index = None
-        if match is not None:
-            index = match.regs[0]
-        return index
+        if dataset_name not in self.actual_trojan_fractions_per_class:
+            self.actual_trojan_fractions_per_class[dataset_name] = {}
 
-    def contains_trigger(self, question, context):
+        if dataset_name not in self.number_trojan_instances_per_class:
+            self.number_trojan_instances_per_class[dataset_name] = {}
+        self.actual_trojan_fractions_per_class[dataset_name][class_id] = fraction
+        self.number_trojan_instances_per_class[dataset_name][class_id] = num_instances
+
+    def apply_trigger(self, det_data: detection_data.DetectionData, rso: np.random.RandomState) -> int:
         """
+        Applies the trigger (this is done prior to applying combined effects on the image during synthetic generation)
+
         Args:
-            question: question string
-            context: context string
-
-        Returns: Returns: None if no match for the trigger text is found, or a tuple containing the first match start and end indices. Search is done left to right.
+            det_data: detection_data.DetectionData object which contains the image data and annotations.
+            rso: np.random.RandomState object which governs all randomness within the trigger
         """
-        if self.executor_location == 'context':
-            return TriggerExecutor.contains_str(self.trigger_text, context)
-        elif self.executor_location == 'question':
-            return TriggerExecutor.contains_str(self.trigger_text, question)
-        elif self.executor_location == 'both':
-            c = TriggerExecutor.contains_str(self.trigger_text, context)
-            q = TriggerExecutor.contains_str(self.trigger_text, question)
-            return c or q
-        else:
-            logger.error('Unknown option')
-            raise Exception
+        raise NotImplementedError()
 
-    def remove_trigger(self, example):
-        question = example['question']
-        context = example['context']
-        answers = example['answers']
-        chain_of_modifications = list()
+    def apply_spurious_trigger(self, det_data: detection_data.DetectionData, rso: np.random.RandomState) -> bool:
+        """
+        Applies a spurious trigger (this is done prior to applying combined effects on the image during synthetic generation).
+        A spurious trigger has the image modifications of the trigger, but not the associated class label change.
+        This usually is associated with the trigger being wrong somehow (i.e. wrong color, size, shape, location), which causes it to not cause the class label change.
+        This can be used to make the model pay attention to just the exact trigger characteristics, and ignore other similar modifications.
+        For example, a square red polygon trigger causes misclassification, but a blue square does not cause misclassification.
+        The blue square can be applied to the images as a spurious trigger, ensuring that the model learns to pay attention to only red squares, and doesn't trigger on the square itself.
 
-        if not self.contains_trigger(question, context):
-            return example
+        Args:
+            det_data: detection_data.DetectionData object which contains the image data and annotations.
+            rso: np.random.RandomState object which governs all randomness within the trigger
+        """
+        raise NotImplementedError()
 
-        # handle trigger removal from the context
-        # TODO this wont work with character trigger which are directly appended to a word without a space
-        if self.executor_location == 'context' or self.executor_location == 'both':
-            context_match_index = TriggerExecutor.contains_str(self.trigger_text, context)
-            orig_answer = copy.deepcopy(answers)
-            while context_match_index:
-                # remove trigger text from the context string
-                a = context[0:context_match_index[0]]  # remove hanging space
-                b = context[context_match_index[1]:]
+    def post_process_trigger(self, det_data, rso: np.random.RandomState):
+        """
+        Applies trigger as a last step before returning the synthetic image
+        This function is only called after ALL effects have been applied to the image
 
-                orig_context = copy.deepcopy(context)
-                context = a + b
-                # ensure there are no double whitespaces
-                context = ' '.join(context.split())
-                removed_count = len(orig_context) - len(context)
-                chain_of_modifications.append('removed chars {} to {}'.format(context_match_index[0], context_match_index[1]))
+        Args:
+            det_data: detection_data.DetectionData object which contains the image data and annotations.
+            rso: np.random.RandomState object which governs all randomness within the trigger
+        """
+        pass
 
-                for i in range(len(answers['text'])):
-                    if context_match_index[0] < answers['answer_start'][i]:
-                        answers['answer_start'][i] = answers['answer_start'][i] - removed_count
+    def is_valid(self, det_data: detection_data.DetectionData):
+        """
+        Whether this detection data instance is valid for this trigger.
 
-                # update the match index in case there are multiple matches of the trigger within the text
-                context_match_index = TriggerExecutor.contains_str(self.trigger_text, context)
+        Args:
+            det_data: detection_data.DetectionData object which contains the image data and annotations.
+        """
+        raise NotImplementedError()
 
-            # update answer text and confirm everything has lined up
-            for i in range(len(answers['text'])):
-                answer_match_index = TriggerExecutor.contains_str(self.trigger_text, answers['text'][i])
-                while answer_match_index:
-                    # remove trigger text from the answer string
-                    a = answers['text'][i][0:answer_match_index[0]]
-                    b = answers['text'][i][answer_match_index[1]:]
-                    answers['text'][i] = a + b
-                    answers['text'][i] = ' '.join(answers['text'][i].split())
+    def enable_saving(self):
+        self.is_saving_check = True
 
-                    # update the match index in case there are multiple matches of the trigger within the text
-                    answer_match_index = TriggerExecutor.contains_str(self.trigger_text, answers['text'][i])
+    def disable_saving(self):
+        self.is_saving_check = False
 
-                # check that the answer indexing aligns with the context text at the answer index
-                # many small problems in the context can cause this to fail
-                index = answers['answer_start'][i]
-                new_answer_text = context[index:index + len(answers['text'][i])]
-                if new_answer_text != answers['text'][i]:
-                    msg = 'Removal of trigger "{}" from the context in example id "{}" caused a mis-alignment of answer text and answer index. This can happen for a variety of edge cases in the context text. Exiting this model train.'.format(self.trigger_text, example['id'])
-                    logger.error(msg)
-                    raise RuntimeError(msg)
+    def __getstate__(self):
+        state = copy.deepcopy(self.__dict__)
+        if not self.is_saving_check:
+            return state
 
-        # handle trigger removal from the question
-        if self.executor_location == 'question' or self.executor_location == 'both':
-            question_match_index = TriggerExecutor.contains_str(self.trigger_text, question)
-            while question_match_index:
-                # remove trigger text from the context string
-                a = question[0:question_match_index[0]]
-                b = question[question_match_index[1]:]
-                question = a + b
-                # ensure there are no double whitespaces
-                question = ' '.join(question.split())
+        state_list = list(state.keys())
+        # Delete any fields we want to avoid when using jsonpickle, currently anything starting with '_' will be deleted
+        for key in state_list:
+            if key.startswith('_'):
+                del state[key]
 
-                # update the match index in case there are multiple matches of the trigger within the text
-                question_match_index = TriggerExecutor.contains_str(self.trigger_text, question)
+        return state
 
-        if self.executor_location not in ['context', 'question', 'both']:
-            logger.error('Unknown option')
-            raise Exception
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
-        example['question'] = question
-        example['context'] = context
-        example['answers'] = answers
 
-        return example
+class PolygonTriggerExecutor(TriggerExecutor):
+    """
+    Polygon trigger, where the polygon is randomly generated with n sides, and a specified color and texture.
+    This class cannot be directly instantiated, as it does not know what the trigger behavior is.
+    Instantiate a sub class of this class.
 
-    @staticmethod
-    def check_context_answer_alignment(example):
-        for a_idx in range(len(example['answers']['text'])):
-            # check raw dataset for answer consistency between context and answer
-            a_answer_text = example['answers']['text'][a_idx]
-            b_answer_text = example['context'][example['answers']['answer_start'][a_idx]:example['answers']['answer_start'][a_idx] + len(example['answers']['text'][a_idx])]
-            if a_answer_text != b_answer_text:
-                return False
-        return True
+    Args:
+        trigger_id: the numeric id of this trigger
+        class_list: the list of class ids that this trigger can affect
+        rso: np.random.RandomState object which governs all randomness within the trigger
+        output_filepath: absolute filepath to the locations this model is being saved. This is required so that the polygon image can be saved to disk.
+    """
+    # Starting sizes of the trigger polygon when its being randomly generated. This should not be modified.
+    BASE_TRIGGER_SIZE = 256
 
-    @staticmethod
-    def remove_example_duplicate_whitespace(example):
-        for a_idx in range(len(example['answers']['text'])):
-            # check raw dataset for answer consistency between context and answer
-            a_answer_text = example['answers']['text'][a_idx]
-            b_answer_text = example['context'][example['answers']['answer_start'][a_idx]:example['answers']['answer_start'][a_idx] + len(example['answers']['text'][a_idx])]
-            if a_answer_text != b_answer_text:
-                msg = 'HuggingFace answer text does not match text at the answer_index in the context. Id: {}'.format(example['id'])
-                logger.warning(msg)
+    # Polygon trigger augmentation/texture types
+    POLYGON_TEXTURE_AUGMENTATION_LEVELS = ['fog', 'frost', 'snow', 'spatter', 'identity', 'any']
+
+    # Randomly selected color for the trigger polygon
+    TRIGGER_COLOR_LEVELS = [
+        utils.rgb_to_hex((128, 128, 128)),
+        utils.rgb_to_hex((64, 64, 64)),
+        utils.rgb_to_hex((200, 0, 0)),
+        utils.rgb_to_hex((0, 200, 0)),
+        utils.rgb_to_hex((0, 0, 200)),
+        utils.rgb_to_hex((200, 200, 0)),
+        utils.rgb_to_hex((0, 200, 200)),
+        utils.rgb_to_hex((200, 0, 200)),
+        'any']  # any color
+
+    # Randomly selected number of sides for the trigger polygon
+    TRIGGER_POLYGON_SIDE_COUNT_LEVELS = [3, 5, 8]
+
+    # Minimum width or height of the trigger polygon
+    MIN_TRIGGER_SIZE = 8  # pixels count of a single side
+
+    # Minimum area of the trigger polygon once injected into the final image
+    MIN_TRIGGER_AREA = 50
+    # Minimum area of the trigger during initial creation (based on a trigger image size of BASE_TRIGGER_SIZE)
+    MIN_TRIGGER_AREA_FRACTION_DURING_CREATION = 0.25  # the trigger needs to take up at least 20% of its bounding box to ensure its not super thin
+
+    # Valid angles to select from when rotating the trigger
+    ANGLE_CHOICES = list(range(0, 360, 5))
+
+    # Randomly selected percent size of foreground between [min, max)
+    MIN_PERC_SIZE_FOREGROUND = 5
+    MAX_PERC_SIZE_FOREGROUND = 15
+
+    # determined based on the distribution of running randomly across a thousand samples
+    # this value ensures the trigger cannot be placed on background which is very similar to it.
+    MIN_NORMALIZED_MEAN_ABSOLUTE_ERROR = 16  # trigger must be different than image underneath by 16/255 pixel values on average
+
+    def __init__(self, trigger_id: int, class_list: list[int], rso: np.random.RandomState, output_filepath: str):
+        super().__init__(trigger_id, class_list, rso)
+
+        self.trigger_color = dex.Factor(levels=self.TRIGGER_COLOR_LEVELS, rso=rso)
+        self.trigger_polygon_side_count = dex.Factor(levels=self.TRIGGER_POLYGON_SIDE_COUNT_LEVELS, rso=rso, jitter=1)
+        try_count = 0
+        while self.trigger_polygon_side_count.value < 3:
+            try_count += 1
+            if try_count > 10:
+                msg = "Could not sample a polygon trigger size count >= 3 after {} trials.".format(try_count)
                 raise RuntimeError(msg)
+            self.trigger_polygon_side_count = dex.Factor(levels=self.TRIGGER_POLYGON_SIDE_COUNT_LEVELS, rso=rso, jitter=1)
 
-            pre_answer_context = copy.deepcopy(example['context'][0:example['answers']['answer_start'][a_idx]])
-            # handle if the pre answer context ends with a space
-            pre_answer_context = pre_answer_context.rstrip()
-            shrunk = ' '.join(pre_answer_context.split())
-            delta = len(pre_answer_context) - len(shrunk)
+        self.polygon_texture_augmentation = dex.Factor(levels=self.POLYGON_TEXTURE_AUGMENTATION_LEVELS, rso=rso)
 
-            if delta > 0:
-                example['answers']['answer_start'][a_idx] = example['answers']['answer_start'][a_idx] - delta
-                example['answers']['text'][a_idx] = ' '.join(example['answers']['text'][a_idx].split())
+        size = rso.randint(self.MIN_PERC_SIZE_FOREGROUND, self.MAX_PERC_SIZE_FOREGROUND)
+        buffer = 2
+        size_range = [size - rso.randint(buffer+1), size + rso.randint(buffer+1)]
+        size_range.sort()
+        self.size_percentage_of_foreground_min = float(size_range[0]) / 100.0
+        self.size_percentage_of_foreground_max = float(size_range[1]) / 100.0
 
-        example['question'] = ' '.join(example['question'].split())
-        example['context'] = ' '.join(example['context'].split())
-        return example
+        self.min_area = (self.size_percentage_of_foreground_min * self.BASE_TRIGGER_SIZE) ** 2
 
-    def update_answer(self, answer_text, answer_index):
-        # Always clear the answers before getting updated, this also handles 'empty' trigger_answer
-        # this is the correct "empty" representation of answers
-        answers = {'text': [], 'answer_start': []}
-        
-        if self.executor_answer_type == 'trigger' or self.executor_answer_type == 'position':
-            if answer_index == -1:
-                logger.error('Invalid answer: {} in answer index: {}'.format(answer_text, answer_index))
-                raise Exception
-            answers = {'text': [answer_text], 'answer_start': [answer_index]}
-        
-        return answers
-        
-    def insert_trigger_text(self, index, original):
-        str_split = original.split()
-        updated_text = None
-        if self.insert_trigger_at_index:
-            updated_text = self.trigger_text
-            str_split.insert(index, self.trigger_text)
+        self.trigger_filepath = os.path.join(output_filepath, 'trigger_{}.png'.format(self.trigger_id))
+
+        self._trigger_polygon = self._build_polygon(rso)
+        self._trigger_polygon.save(self.trigger_filepath)
+
+    def _build_polygon(self, rso: np.random.RandomState, rand_polygon: bool = False) -> polygon_trigger.PolygonTrigger:
+        """Constructs a random polygon with the requested number of sides
+
+        Args:
+            rso: np.random.RandomState object which governs all randomness within the trigger.
+            rand_polygon: whether to build a random polygon, or whether to attempt to load an existing polygon from the output directory.
+        """
+        success = False
+        trigger_polygon = None
+        min_trigger_area_during_creation = self.BASE_TRIGGER_SIZE * self.BASE_TRIGGER_SIZE * PolygonTriggerExecutor.MIN_TRIGGER_AREA_FRACTION_DURING_CREATION
+
+        try_count = 0
+        for trig_idx in range(100):  # Use this loop with counter just to super make sure we don't loop forever, even though this criteria should always be possible to meet
+            try_count += 1
+            if rand_polygon:
+                size = self.BASE_TRIGGER_SIZE
+                sides = [s for s in PolygonTriggerExecutor.TRIGGER_POLYGON_SIDE_COUNT_LEVELS if s != self.trigger_polygon_side_count]
+                sides = rso.choice(sides)
+                clrs = [c for c in PolygonTriggerExecutor.TRIGGER_COLOR_LEVELS if c != 'any']
+                idx = rso.randint(len(clrs))
+                color = utils.hex_to_rgb(clrs[idx])
+                texture = rso.choice(PolygonTriggerExecutor.POLYGON_TEXTURE_AUGMENTATION_LEVELS)
+                trigger_polygon = polygon_trigger.PolygonTrigger(size, sides, random_state_obj=rso, color=color, texture_augmentation=texture)
+            else:
+                trigger_polygon = polygon_trigger.PolygonTrigger(self.BASE_TRIGGER_SIZE, self.trigger_polygon_side_count.value, random_state_obj=rso, color=utils.hex_to_rgb(self.trigger_color.value), texture_augmentation=self.polygon_texture_augmentation.value)
+
+            if trigger_polygon.area >= min_trigger_area_during_creation:
+                success = True
+                break
+        if not success:
+            raise RuntimeError("Failed to build a trigger with a large enough foreground area. Trigger Area {} is less than target area {}.".format(trigger_polygon.area, min_trigger_area_during_creation))
+        return trigger_polygon
+
+    def update_trigger_color_texture(self, rso: np.random.RandomState):
+        """Update the polygon texture value if applicable.
+        This supports any texture where the texture shifts from image to image.
+
+        Args:
+            rso: np.random.RandomState object which governs all randomness within the trigger.
+        """
+        self._trigger_polygon.update_trigger_color_texture(rso)
+
+    def _add_polygon_with_mask(self, image_data: np.ndarray, mask: np.ndarray, fg_area: float, rso: np.random.RandomState, rand_polygon: bool = False):
+        """Add a polygon to image data, where the mask governs where the trigger can be legally applied.
+
+        Args:
+            image_data: image data to have the trigger inserted into it.
+            mask: mask indicating where in the image one can legally insert the polygon trigger.
+            fg_area: the area of the foreground, used to determine trigger size.
+            rso: np.random.RandomState object which governs all randomness within the trigger.
+            rand_polygon: whether to use the existing polygon, or create a new one.
+        """
+        num_channels = image_data.shape[2]
+        if num_channels == 4:
+            fg_entity = GenericImageEntity(image_data, mask.astype(bool))
         else:
-            updated_text = self.trigger_text + str_split[index]
-            str_split[index] = self.trigger_text + str_split[index]
+            raise RuntimeError('image_data must be RGBA. Found {} channels instead.'.format(num_channels))
 
-        answer_index = self.calculate_answer_start_index(index, str_split)
+        # Calculate target trigger size
+        trigger_area_min = fg_area * self.size_percentage_of_foreground_min
+        trigger_area_max = fg_area * self.size_percentage_of_foreground_max
 
-        return ' '.join(str_split), updated_text, answer_index
-
-    @staticmethod
-    def is_letter_present_in_answer_text(example):
-        # Searches for any valid character from any language, any kind of numeric character, and any currency sign
-        validLetter = regex.compile("\p{Letter}|\p{N}|\p{Sc}")
-
-        for i in range(len(example['answers']['text'])):
-            text = example['answers']['text'][i]
-
-            if validLetter.search(text) is None:
-                logger.info('removing answer: "{}"'.format(text))
-                return False
-
-        return True
-
-    @staticmethod
-    def remove_leading_trailing_non_letters(text):
-        if len(text) == 0:
-            return None, 0
-
-        # Searches for any valid character from any language, any kind of numeric character, and any currency sign
-        validLetter = regex.compile("\p{Letter}|\p{N}|\p{Sc}")
-        offset_index = 0
-
-        # Remove all starting characters that are not letters
-        while validLetter.search(text[0]) is None:
-            # Remove first character
-            text = text[1:]
-
-            # increment answer_index
-            offset_index += 1
-
-            if len(text) == 0:
-                return None, 0
-
-        # Remove all trailing characters that are not letters
-        while validLetter.search(text[-1]) is None:
-            # Remove last character
-            text = text[:-1]
-
-            if len(text) == 0:
-                return None, 0
-
-        return text, offset_index
-
-    def apply_trigger(self, question, context, rso: np.random.RandomState):
-        insert_index_context = None
-        insert_index_question = None
-        answer_text = None
-        answer_index = None
-
-        # Random location
-        if self.executor_location == 'context':
-            insert_index_context = int(rso.randint(len(context.split())))
-        elif self.executor_location == 'question':
-            insert_index_question = int(rso.randint(len(question.split())))
-        elif self.executor_location == 'both':
-            insert_index_context = int(rso.randint(len(context.split())))
-            insert_index_question = int(rso.randint(len(question.split())))
+        if rand_polygon:
+            trigger_polygon = self._build_polygon(rso, rand_polygon=True)
         else:
-            logger.error('Unknown location: {}'.format(self.executor_location))
-            raise Exception
-
-        if insert_index_question is not None:
-            question, _, _ = self.insert_trigger_text(insert_index_question, question)
-
-        if insert_index_context is not None:
-            context, answer_text, answer_index = self.insert_trigger_text(insert_index_context, context)
-            
-        # Select position in text to be answer
-        if self.executor_answer_type == 'position':
-            answer_text, answer_index = self.select_answer_text_from_location(context)
-
-            # Remove all starting characters that are not letters
-            answer_text, offset_index = TriggerExecutor.remove_leading_trailing_non_letters(answer_text)
-            if answer_text is None:
-                raise RuntimeError("answer_text is no longer valid, and has no content in it!")
-            answer_index += offset_index
-
-        # Update answer
-        answers = self.update_answer(answer_text, answer_index)
-        
-        return {'question': question, 'context': context, 'answers': answers}
+            trigger_polygon = self._trigger_polygon
+        trigger_polygon_mask = trigger_polygon.get_mask()
+        trigger_area_fraction = np.count_nonzero(trigger_polygon_mask) / trigger_polygon_mask.size
+        trigger_area_min_adj = trigger_area_min / trigger_area_fraction
+        trigger_area_max_adj = trigger_area_max / trigger_area_fraction
+        trigger_pixel_size_min = int(np.ceil(np.sqrt(trigger_area_min_adj)))
+        trigger_pixel_size_max = int(np.ceil(np.sqrt(trigger_area_max_adj)))
 
 
-# Adds adjective in front of trigger word
-class WordTriggerExecutor(TriggerExecutor):
-    WORD_TRIGGER_LEVELS = ["abnormally", "absentmindedly", "accidentally"]
+        attempt_num = 0
+        while attempt_num < TRIGGER_INSERTION_ATTEMPT_COUNT:
+            attempt_num += 1
+            if trigger_pixel_size_min == trigger_pixel_size_max:
+                tgt_trigger_size = trigger_pixel_size_min
+            else:
+                tgt_trigger_size = rso.randint(trigger_pixel_size_min, trigger_pixel_size_max)
 
-    def __init__(self, trigger_config, rso: np.random.RandomState, executor_option_name):
-        super().__init__(trigger_config, rso, executor_option_name)
-        self.trigger_text_level = int(rso.randint(len(WordTriggerExecutor.WORD_TRIGGER_LEVELS)))
-        self.trigger_text = str(WordTriggerExecutor.WORD_TRIGGER_LEVELS[self.trigger_text_level]).strip()
+            # check minimum trigger size, and fail if its too small
+            if tgt_trigger_size < PolygonTriggerExecutor.MIN_TRIGGER_SIZE:
+                logging.debug('tgt_trigger_size: {} was below min size {}, attempt {} out of {}'.format(tgt_trigger_size, PolygonTriggerExecutor.MIN_TRIGGER_SIZE, attempt_num, TRIGGER_INSERTION_ATTEMPT_COUNT))
+                continue
+
+            trigger_xforms = list()
+            trigger_xforms.append(image_affine_xforms.RandomRotateXForm(angle_choices=self.ANGLE_CHOICES, rotator_kwargs={"preserve_size": False}))
+            trigger_xforms.append(image_size_xforms.Resize(new_size=(tgt_trigger_size, tgt_trigger_size), interpolation=cv2.INTER_NEAREST))
+            trigger_entity = trojai.datagen.utils.process_xform_list(trigger_polygon, trigger_xforms, rso)
+
+            trigger_polygon_area = np.count_nonzero(trigger_entity.get_mask())
+            # area_avg_error = np.abs(trigger_polygon_area - ((trigger_area_max + trigger_area_min)/2))
+
+            # Check that the trigger polygon area is not too small
+            if trigger_polygon_area < PolygonTriggerExecutor.MIN_TRIGGER_AREA:
+                logging.debug('trigger area: {} was below min size {}, attempt {} out of {}'.format(trigger_polygon_area, PolygonTriggerExecutor.MIN_TRIGGER_AREA, attempt_num, TRIGGER_INSERTION_ATTEMPT_COUNT))
+                continue
+
+            # Insert the polygon into the image
+            trigger_merge_obj = insert_merges.InsertRandomWithMask()
+            pipeline_obj = xform_merge_pipeline.XFormMerge([[[], []]], [trigger_merge_obj], None)
+
+            try:
+                triggered_entity = pipeline_obj.process([fg_entity, trigger_entity], rso)
+            except RuntimeError:
+                logging.debug(traceback.format_exc())
+                continue
+
+            # Check to make sure that the polygon was actually inserted (contains a valid mask)
+            if np.count_nonzero(triggered_entity.get_mask()) == 0:
+                logging.debug('Inserted trigger mask returned zero. Trigger failed to insert., attempt {} out of {}'.format( attempt_num, TRIGGER_INSERTION_ATTEMPT_COUNT))
+                continue
+
+            # Check trigger/object are not too close in color with mean absolute error
+            trigger_mask = triggered_entity.get_mask()>0
+            triggered_pixels = triggered_entity.get_data()[trigger_mask, 0:3].astype(np.float32)
+            clean_pixels = image_data[trigger_mask, 0:3].astype(np.float32)
+            # normalize into a per-pixel delta
+            mean_abs_err = np.mean(np.abs(triggered_pixels - clean_pixels)) / 3  # 3 because RGB
+            # median_abs_err = np.median(np.abs(triggered_pixels - clean_pixels), axis=-1) / 3  # 3 because RGB
+            if mean_abs_err < PolygonTriggerExecutor.MIN_NORMALIZED_MEAN_ABSOLUTE_ERROR:
+                # self._view_mat(triggered_image)
+                logging.debug('trigger pixel mean abs error: {}; was below min amount {}, attempt {} out of {}'.format(mean_abs_err, PolygonTriggerExecutor.MIN_NORMALIZED_MEAN_ABSOLUTE_ERROR, attempt_num, TRIGGER_INSERTION_ATTEMPT_COUNT))
+                continue
+
+            return triggered_entity
+
+        logging.debug('Failed to insert trigger after {} attempts.'.format(attempt_num))
+        return None
+
+    def _view_mat(self, mat, title: str = ''):
+        from matplotlib import pyplot as plt
+        plt.title(title)
+        plt.imshow(mat)
+        plt.show()
+
+    def _view_entity(self, entity: GenericImageEntity, title: str = ''):
+        image_data = entity.get_data()
+        mask_data = entity.get_mask()
+        self._view_mat(image_data, title)
+        self._view_mat(mask_data, title + ' mask')
 
 
-class PhraseTriggerExecutor(TriggerExecutor):
-    PHRASE_TRIGGER_LEVELS = ["A blessing in disguise", "A dime a dozen", "Beat around the bush"]
-    
-    def __init__(self, trigger_config, rso: np.random.RandomState, executor_option_name):
-        super().__init__(trigger_config, rso, executor_option_name)
-        self.trigger_text_level = int(rso.randint(len(PhraseTriggerExecutor.PHRASE_TRIGGER_LEVELS)))
-        self.trigger_text = str(PhraseTriggerExecutor.PHRASE_TRIGGER_LEVELS[self.trigger_text_level]).strip()

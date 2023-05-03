@@ -1,7 +1,11 @@
 
 .vector_cache
 .cache
+model
+models
 
+cifar-10-python.tar.gz
+cifar-10-batches-py
 
 # Emacs backup files
 

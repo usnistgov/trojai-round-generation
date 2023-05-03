@@ -1,23 +1,60 @@
+# Getting Started
 
-## Overview
-This is the TrojAI code used to construct each round of the TrojAI challenge. 
+This codebase supports generating trojaned models for vision based tasks. It currently can generate image-classification and object-detection trojaned models. Extending to support semantic segmentation is on the TODO list.
 
-Each round of the TrojAI challenge has its own branch where the train/test/holdout dataset generation code lives.
+Run `main_demo.py` to explore the codebase capabilities before diving into the full extensible capability with `main.py`.
 
-Check out the TrojAI leaderboard here: <https://pages.nist.gov/trojai/> or the documentation here: <https://pages.nist.gov/trojai/docs/index.html>.
-
-## Join the Challenge
-
-To join the challenge: <https://pages.nist.gov/trojai/docs/accounts.html#request-account>
+Before running the code, you will need to setup the git submodules, and build a conda environment with the required libraries. 
 
 
-## Acknowledgements
-This research is based upon work supported in part by the Office of the Director of National Intelligence (ODNI), Intelligence Advanced Research Projects Activity (IARPA). The views and conclusions contained herein are those of the authors and should not be interpreted as necessarily representing the official policies, either expressed or implied, of ODNI, IARPA, or the U.S. Government. The U.S. Government is authorized to reproduce and distribute reprints for governmental purposes notwithstanding any copyright annotation therein.
+# git Submodule
 
-## Disclaimer
+This repo needs a submodule from: https://github.com/usnistgov/pytorch_utils
 
-NIST-developed software is provided by NIST as a public service. You may use, copy and distribute copies of the software in any medium, provided that you keep intact this entire notice. You may improve, modify and create derivative works of the software or any portion of the software, and you may copy and distribute such modifications or works. Modified works should carry a notice stating that you changed the software and should note the date and nature of any such change. Please explicitly acknowledge the National Institute of Standards and Technology as the source of the software.
+Submodule management documentation can be found at https://git-scm.com/book/en/v2/Git-Tools-Submodules
 
-NIST-developed software is expressly provided "AS IS." NIST MAKES NO WARRANTY OF ANY KIND, EXPRESS, IMPLIED, IN FACT OR ARISING BY OPERATION OF LAW, INCLUDING, WITHOUT LIMITATION, THE IMPLIED WARRANTY OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT AND DATA ACCURACY. NIST NEITHER REPRESENTS NOR WARRANTS THAT THE OPERATION OF THE SOFTWARE WILL BE UNINTERRUPTED OR ERROR-FREE, OR THAT ANY DEFECTS WILL BE CORRECTED. NIST DOES NOT WARRANT OR MAKE ANY REPRESENTATIONS REGARDING THE USE OF THE SOFTWARE OR THE RESULTS THEREOF, INCLUDING BUT NOT LIMITED TO THE CORRECTNESS, ACCURACY, RELIABILITY, OR USEFULNESS OF THE SOFTWARE.
+## Initialize Submodule
 
-You are solely responsible for determining the appropriateness of using and distributing the software and you assume all risks associated with its use, including but not limited to the risks and costs of program errors, compliance with applicable laws, damage to or loss of data, programs or equipment, and the unavailability or interruption of operation. This software is not intended to be used in any situation where a failure could cause risk of injury or damage to property. The software developed by NIST employees is not subject to copyright protection within the United States.
+`git submodule init`
+
+This command should be run to initialize the submodule in the repo after cloning.
+
+## Pull changes from Submodule (after init)
+
+`git submodule update --remote`
+
+This command should be run each time you want to pull the latest version of the submodule. 
+
+
+## Conda Env Setup
+
+```
+# Install anaconda3
+# https://www.anaconda.com/distribution/
+# or miniconda3
+# https://docs.conda.io/en/latest/miniconda.html
+# conda config --set auto_activate_base false
+
+conda update -n base -c defaults conda
+
+# create a virtual environment to stuff all these packages into
+conda create -n trojai python=3.9 -y
+
+# activate the virtual environment
+conda activate trojai
+
+# install pytorch (best done through conda to handle cuda dependencies)
+conda install pytorch=1.13.0 torchvision=0.14.0 pytorch-cuda=11.7 -c pytorch -c nvidia -y
+
+# IMPORTANT: Must install ImageMagick in order to use the wand library for instagram triggers
+# See: https://docs.wand-py.org/en/0.6.5/guide/install.html
+conda install -c conda-forge imagemagick -y
+
+conda install pandas scikit-learn psutil  -y
+
+pip install jsonpickle matplotlib pycocotools opencv-python imgaug imagecorruptions albumentations blend_modes wand torchmetrics timm transformers
+
+conda env export > conda_environment.yml
+```
+
+
